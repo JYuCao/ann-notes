@@ -38,11 +38,15 @@ https://disk.yandex.com/d/90OADxPeLx_ztg?ref=theroboverse.com
 ```bash
 # For Orin Nano
 cd JetPack_6.2.1_Linux_JETSON_ORIN_NANO_TARGETS/Linux_for_Tegra/
-sudo ./tools/kernel_flash/l4t_initrd_flash.sh --external-device nvme0n1p1 -p "-c ./bootloader/generic/cfg/flash_t234_qspi.xml" -c ./tools/kernel_flash/flash_l4t_t234_nvme.xml --showlogs --network usb0  jetson-orin-nano-devkit-super external
+sudo ./tools/kernel_flash/l4t_initrd_flash.sh --external-device nvme0n1p1 \
+-p "-c ./bootloader/generic/cfg/flash_t234_qspi.xml" -c ./tools/kernel_flash/ \
+flash_l4t_t234_nvme.xml --showlogs --network usb0  jetson-orin-nano-devkit-super external
 
 # For Orin NX
 cd JetPack_6.2.1_Linux_JETSON_ORIN_NX_TARGETS/Linux_for_Tegra/
-sudo ./tools/kernel_flash/l4t_initrd_flash.sh --external-device nvme0n1p1 -p "-c ./bootloader/generic/cfg/flash_t234_qspi.xml" -c ./tools/kernel_flash/flash_l4t_t234_nvme.xml --showlogs --network usb0  jetson-orin-nano-devkit external
+sudo ./tools/kernel_flash/l4t_initrd_flash.sh --external-device nvme0n1p1 \
+-p "-c ./bootloader/generic/cfg/flash_t234_qspi.xml" -c ./tools/kernel_flash/ \
+flash_l4t_t234_nvme.xml --showlogs --network usb0  jetson-orin-nano-devkit external
 ```
 
 ## 升级结束后
