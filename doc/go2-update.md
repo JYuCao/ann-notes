@@ -71,6 +71,19 @@ Unitree GO2 EDU 的 Jetson 板卡不带无线网卡，因此需要接入 USB 无
 
 安装完成后，连接 wifi，即可以通过 ssh 进行远程连接。
 
+### 系统升级后 realsense 所用 usb 口无法识别
+
+现象：
+
+- 前部 USB（usb2-0）OTG 端口在系统中处于 role = none（非 Host 模式），导致外设无法进入正常 USB 枚举流程
+- 系统缺失用于该载板 USB 供电与控制的 realsense-usb-power.service，导致 RealSense 所在 USB 口 VBUS/GPIO 控制链路未被激活
+
+解决办法：
+
+- 写入 USB 控制寄存器 0x02430030 = 0x004，切换 OTG 端口至 Host 模式
+- 持续拉高 GPIO PP.06（gpiochip0 line 98），恢复 RealSense 端口供电
+- 相机立即完成 USB 枚举并恢复正常 UVC 设备节点生成
+
 ### 相关基础环境安装
 > 注意板卡架构为 aarch64，安装软件时需要注意选择对应架构的版本。
 1. 安装 ROS2 Humble：https://docs.ros.org/en/humble/Installation/Ubuntu-Install-Debs.html
