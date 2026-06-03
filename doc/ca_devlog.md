@@ -35,6 +35,8 @@ filter box 是 src/utilities/transform_sensors/transform_sensors/transform_every
 
 **解决方法**：重写 transform_everything.py 并对 cuvslam_ros_bridge 的坐标变换部分进行轻量修改，重新设计 filter box 的坐标系，使其仅与 body tf 相关，并加入 yaw 角度旋转，使其正确对齐机器狗的坐标系，最后进行平移，从而正确屏蔽掉机器狗自身的点云数据。 
 
+**修复结果**：filter box 已经正确对齐机器狗的坐标系，能够有效屏蔽掉机器狗自身的点云数据，避免了在避障和路径规划过程中受到干扰。
+
 ### TF 链
 
 原始 TF 链：
@@ -52,9 +54,11 @@ map
 * sensor: 传感器坐标系，由 static_transform_publisher 发布
 * camera_link: 相机坐标系，由 static_transform_publisher 发布
 
-现存问题：cuVSLAM 的 camera_init（即map，两者目前完全重合）的原点和朝向是由 SLAM 启动时第一帧相机位姿决定的，是任意的
+**现存问题**：cuVSLAM 的 camera_init（即map，两者目前完全重合）的原点和朝向是由 SLAM 启动时第一帧相机位姿决定的，是任意的
 
-修复方案：增添写死的 world tf 固定 map 的原点和朝向，之后将 camera_init 和 aft_mapped 的 tf 发布改为相对于 world 发布，这样就能保证每次启动 SLAM 时 map 的原点和朝向都是固定的了。
+**修复方案**：增添写死的 world tf 固定 map 的原点和朝向，之后将 camera_init 和 aft_mapped 的 tf 发布改为相对于 world 发布，这样就能保证每次启动 SLAM 时 map 的原点和朝向都是固定的了。
+
+**修复结果**：SLAM 启动后，只要重定位成功，map 的朝向就会固定在 world 坐标系下，保证了重定位后地图的正确对齐。
 
 修复后的 TF 链：
 ```
@@ -79,7 +83,7 @@ world
 
 已修复的问题：
 
-1. 由于 cuVSLAM 的静态地图没有与 autonomy 部分的坐标系对齐，导致每次重定位虽然成功了，但方向没有统一。解决方法详见 “TF 链” 部分
+1. 由于 cuVSLAM 的静态地图没有与 autonomy 部分的坐标系对齐，导致每次重定位虽然成功了，但方向没有统一。解决方法与结果详见 “TF 链” 部分
 
 目前存在的问题：
 
@@ -88,5 +92,7 @@ world
 
 ### cuVSLAM 相关
 
+已修复的问题：
 1. cuVSLAM 的 imu 无法启用，经检查是外围脚本把 host 的 librealsense 覆盖进 docker 容器，host的 librealsense 版本无法识别 D435i 的 imu。
     - 解决方法：在外围脚本中设置优先使用容器内的 librealsense 库，或者更新 host 的 librealsense 版本以支持 D435i 的 imu。
+    - 修复结果：cuVSLAM 的 imu 已经成功启用，能够提供更稳定的位姿估计。
