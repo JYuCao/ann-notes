@@ -21,7 +21,7 @@ system_cuvslam_cruise_headless.sh
 
 1. fix：修复局部导航问题，确保机器狗能够正确识别狭窄通道并通过。
 2. fix：优化重定位触发条件，减少误触发的情况。
-3. feature：尝试使用 terrain_map 进行静态建图与地图更新。
+3. feat🌟：尝试使用 terrain_map/cuVLSAM 点云进行静态建图与地图更新。
 
 ### filter box
 
@@ -82,16 +82,7 @@ world
     - 开启 /free_paths 的可视化发布，观察 local_planner 的路径规划结果，分析问题原因。
         - 开启 /free_paths 发布后可视化卡顿严重，采用已有下采样工具链 _downsample_cloud + downsample_xyzi，走 fast TCP 发布；同时对 cuVLSAM 的位姿发布进行偶数过滤，不影响原始跟踪质量的情况下减少发布频率，降低系统负载。
         - 下采样后卡顿明显减少，可以进行诊断。初步诊断发现 free paths 静止时因无规划会变为扇形，属于正常现象；问题出在机器狗进入狭窄通道前的摇晃导致terrain map更新异常，free paths 规划混乱，导致机器狗无法正确识别狭窄通道并通过。可以尝试先降低前进速度和加速度，优化yaw阻尼减少摇晃
-
-### 重定位
-
-已修复的问题：
-
-1. 由于 cuVSLAM 的静态地图没有与 autonomy 部分的坐标系对齐，导致每次重定位虽然成功了，但方向没有统一。解决方法与结果详见 “TF 链” 部分
-
-目前存在的问题：
-
-1. 巡航过程中重定位的触发条件过于敏感，导致在正常巡航过程中偶尔会误触发重定位，导致地图到处乱飞。
+        - 本质是调参问题，在参数调整后现在已经可以平稳通过门宽的狭窄通道了，但是更狭窄的通道仍然无法通过。
 
 
 ### cuVSLAM 相关
@@ -100,3 +91,15 @@ world
 1. cuVSLAM 的 imu 无法启用，经检查是外围脚本把 host 的 librealsense 覆盖进 docker 容器，host的 librealsense 版本无法识别 D435i 的 imu。
     - 解决方法：在外围脚本中设置优先使用容器内的 librealsense 库，或者更新 host 的 librealsense 版本以支持 D435i 的 imu。
     - 修复结果：cuVSLAM 的 imu 已经成功启用，能够提供更稳定的位姿估计。
+
+### 位姿与地图跳变问题分析
+
+**此完整章节已迁移至 [`pose_jump_chronicle.md`](./pose_jump_chronicle.md)。** 内容包括：
+
+- Round 0：初始分析（recovery 机制为诱因）
+- Round 1：桥接过滤器 5 轮迭代优化与结论（问题不在桥接）
+- Round 2：无过滤 bypass 验证日志（cuVSLAM 自身输出不稳定）
+- Round 3：三 IMU 架构分析（L1 / D435i / Go2 body）
+- Round 4：cuVSLAM 内部 odom→slam pose 切换机制
+- Round 5：IMU 影响与电机振动分析
+- 待确认 / Next Steps
