@@ -233,18 +233,18 @@ RealSense D435i USB 3.0 → Jetson tegra-xusb 控制器
 
 ### 结论
 
-**已确认的事实（由 Round 0–6 数据支撑）：**
+**已确认的事实（由 Round 0–10 数据支撑）：**
 
 1. **桥接过滤器不是根因。** 从 Round 0 分析 → Round 2 bypass 验证，过滤器本身不引发跳变。
 2. **D435i IMU / Camera 在 Jetson 上持续丢帧。** 所有 90+ 个 cuVSLAM session 都有 `IMU stream message drop` 和 `Camera stream message drop`，丢帧计数随运行时间增长（2 → 400+）。
-3. **IMU 丢帧导致 VIO 退化为纯视觉。** cuVSLAM 日志明确显示 `No IMU measurements between camera frames`，融合降级。
-4. **--relocalize-on-tracking-loss 全程禁用。** 排除重定位参与。
+3. **IMU 丢帧不是跳变的直接原因。** Round 10 对比实验：无重定位模式下 IMU 丢帧（21-151 次/session）但位姿几乎无跳变；有重定位模式下丢帧严重（1641 次）且跳变明显。说明 IMU 丢帧单独存在不会引起跳变，需结合其他因素。
+4. **--relocalize-on-tracking-loss 全程禁用。** 排除运行中重定位参与。
 
-**待确认的推测（缺直接证据）：**
-- IMU 丢帧是 USB 带宽不足还是控制器/驱动层面的问题——通过降低帧率（30fps）未改善，倾向后者但**没有 USB 抓包确认**。
-- 丢帧的根本原因是 Jetson 硬件限制还是驱动/内核配置问题——未排查。
+**根因修正（Round 10）：**
 
-**已排除的干预方案（Round 7–9）：**
+跳变核心原因是桥接 `udp_pose_listener` 接收了 cuVSLAM 非定位态（`localized: false`）的 UDP 位姿并发布了错误的 `world→aft_mapped`。当 cuVSLAM 定位成功（`localized: true`）时，桥接强制发布正确位姿，形成跳变。修复：在 `_pose_ok` 分之前加 `is_localized and` 守卫，禁止非定位态位姿流入。
+
+**已排除的干预方案（Round 7–9，已精简 → 详见 `cuvslam-autonomy-imu` 分支）：**
 
 | 尝试 | 结果 | 结论 |
 |------|------|------|
@@ -252,49 +252,99 @@ RealSense D435i USB 3.0 → Jetson tegra-xusb 控制器
 | Round 8: L1 IMU 陀螺积分桥接 | ❌ 效果差于 D435i IMU | L1 IMU 品质或标定可能不足 |
 | Round 9: Go2 机体 IMU 绝对偏航替换 | ❌ 跳变更严重 | 世界系无法与 cuVSLAM 地图系简单对齐 |
 
-> 干预方案全都实施在分支 cuvslam-autonomy-imu 上，对主线 cuvslam-autonomy 无影响。
+> R7: 45fps 不支持崩溃，30fps 反而丢帧增加 → 带宽假设不成立。R8: L1 IMU 以太网链路，陀螺积分在偏航偏差 > 15° 时替换 cuVSLAM yaw。R9: Go2 AHRS 绝对四元数 + offset 替换。三者均在 `cuvslam-autonomy-imu` 分支，主线无影响。
 
-### Round 7: 降低 D435i 帧率（试探性）
+### Round 10（2026-06-09）：有/无重定位对比 + 根因定论
 
-尝试降低 D435i 相机帧率以减轻 USB 带宽压力，验证丢帧是否由带宽引起。
+**实验设计：** 七轮对比实验，交替运行无重定位（fresh SLAM）和有重定位（localization，map `realsense_stereo_slam_20260601_151246`），观测位姿跳变和 IMU 丢帧。
 
-**方法：** `/home/unitree/cuVSLAM/docker/start_realsense_slam_map.sh` 的 stereo robot preset `--fps 60` → `--fps 45` → `--fps 30`
+**结果：**
 
-**发现：**
-- 45fps → D435i 不支持，`RuntimeError: Couldn't resolve requests`，cuVSLAM 进程崩溃
-- 30fps → 启动成功，但 session `071306` IMU drops 达 **751**（60fps 最差 session 为 403）
+| # | 时间 | 类型 | Poses | IMU 最终 count | 位姿跳变 |
+|---|------|------|------|---------------|---------|
+| 1 | 06:57 | Mapping（无重定位） | 8164 | 21 | ✅ 几乎无跳变 |
+| 2 | 07:03 | Mapping（无重定位） | 1895 | 1 | ✅ 几乎无跳变 |
+| 3 | 07:04 | Mapping（无重定位） | 5791 | 101 | ✅ 几乎无跳变 |
+| 4 | 07:07 | **Localization**（有重定位） | 3385 | 101 | ❌ 跳变明显 |
+| 5 | 07:10 | Mapping（无重定位） | 7385 | 151 | ✅ 几乎无跳变 |
+| 6 | **07:22** | **Localization**（有重定位） | CRASHED | **1641** | ❌ CUDA 崩溃 |
+| 7 | 07:24 | Localization（有重定位） | CRASHED | 1 | ❌ CUDA 崩溃 |
 
-**分析：** 如果丢帧是 USB 带宽饱和导致，减半帧率应大幅减少丢帧。实际反而增加，说明**带宽假设不成立**。但 USB 抓包未做，无法判断是控制器硬件、驱动还是其他原因。
+**关键发现：**
 
-**状态：** 已恢复 60fps，此方向暂停。
+1. **无重定位（Mapping）位姿几乎无跳变**，尽管 IMU 丢帧与之前（21-151 次）类似 → **IMU 丢帧单独不是跳变根因。**
+2. **有重定位（Localization）跳变明显**，且后两次重定位崩溃（`[CUDA] error driver shutting down(4)`）
+3. 重定位会话 072215 包含 **1641 次 IMU 丢帧**（之前最严重为 403），加上 CUDA 崩溃，表明重定位过程本身显著增大了系统压力
 
-### Round 8: L1 IMU Bridge 侧陀螺积分（试探性）
+**跳变根因分析：**
 
-由于 cuVSLAM Docker 不支持外部 IMU 订阅（只有 `--use-imu` 启用 D435i 内置 IMU），在桥接侧实现 IMU 旋转备份。
+桥接 `udp_pose_listener` 在重定位启动阶段收到 cuVSLAM 的 `localized: false` 位姿。原代码 `elif self._pose_ok(pose):` 没有 `is_localized` 守卫，导致非定位态位姿被接受并发布。当 cuVSLAM 最终定位成功（`localized: true`）时，桥接通过 `if is_localized and not self._was_localized:` 强制发布正确位姿，形成跳变。
 
-**方案：** 订阅 L1 LiDAR IMU（`/utlidar/transformed_imu`，以太网链路），陀螺积分跟踪相对旋转，在 cuVSLAM 偏航偏离超过 15° 时替换。
+```
+cuVSLAM 启动（加载地图）
+  ├── localized: false → 桥接 else 分支 → 发布错误位姿 → latest_pose 污染
+  └── localized: true  → 桥接 force-publish → 正确位姿 → JUMP！
+```
 
-**结果：** ❌ 效果甚至不如 D435i IMU。推测原因：
-- L1 本体 IMU 品质较低（主要用于 LiDAR 去畸变，非导航级）
-- `transform_everything` 的标定参数可能有误差
+无重定位（Mapping）模式下 cuVSLAM 一启动就是 `localized: true`（构建新地图无需对齐），不存在上述切换，所以平滑。
 
-**状态：** 此方向暂停。
+**修复（已部署）：**
 
-### Round 9: Go2 机体 IMU 绝对偏航替换（试探性）
+在桥接 `elif self._pose_ok(pose):` 前加 `is_localized and` 守卫，确保非定位态位姿永远不会通过 `_pose_ok` 发布。另修复了 `_R_total_lm` 竞态条件和新增 TF 心跳机制。
 
-改用 Go2 机身内置 AHRS 的绝对四元数（`/lowstate.imu_state.quaternion`），消除积分漂移。
+**遗留问题：**
+- 重定位 session 6/7 的 CUDA 崩溃可能与内存泄漏或长时间 relocalization 尝试有关（日志显示 `nanobind` 引用泄漏）
+- 地图 `realsense_stereo_slam_20260601_151246` 建图时已有 IMU 丢帧，地图质量存疑
 
-**方案：**
-- 首帧计算 offset = cuVSLAM_yaw − Go2_yaw
-- 每帧偏差 > 15° 时用 Go2_yaw + offset 替换
-- offset 学习率 0.05 缓慢跟踪
+### Round 11（2026-06-09）：IMU 丢帧系统分析 + 缓解措施
 
-**结果：** ❌ 跳变更严重。可能原因：
-- Go2 IMU 的世界系（上电初始方向）与 cuVSLAM 地图系不一致
-- AHRS 偏航在机器人运动时受加速度/振动干扰
-- 15° 阈值过大，替换瞬间已造成视觉不连续
+**问题：** 有重定位会话 IMU 丢帧（951 次 / 81s ≈ 11.7次/秒）远高于无重定位（151 次 / 123s ≈ 1.2次/秒），即使定位成功后仍持续丢帧（~8.9次/秒）。
 
-**状态：** 此方向暂停。桥接侧单 IMU yaw 替换不可行。
+**排查过程：**
+
+**设备层：** D435i（FW 5.17.0.10）通过 USB 3.2 连接 Jetson tegra-xusb 控制器。`lsusb -t` 显示 5 路 UVC + 1 路 HID 活跃：
+```
+IR Left, IR Right, Depth, RGB, Metadata, Motion(IMU)
+```
+即使 cuVSLAM 只订阅 IR1+IR2，深度和 RGB 流仍通过 USB 传输（D435i 固件默认行为）。
+
+**系统资源：** MAXN 功率模式，CPU 8核 @ 1.98GHz，内存 2.1/15GB 已用，温度 58-62°C，Docker 无资源限制。
+
+**代码层面：** Mapping 和 Localization 使用完全相同的 camera pipeline（`config.enable_stream(IR1, IR2)`）+ motion pipeline（`rs.stream.accel + rs.stream.gyro`）。唯一差异是 Localization 额外运行 `LocalizationManager`（对每帧做 40000+ 地图陆标的特征匹配），增加 CPU/GPU 开销。
+
+**丢帧时间分布分析：**
+
+| 阶段 | 时长 | IMU stream drops | Camera drops | No IMU meas |
+|------|------|-----------------|-------------|-------------|
+| 定位中（前 35s） | 35s | 1 | 2 | **27** |
+| 跟踪中（后 46s） | 46s | 19 | 31 | 1 |
+
+- **定位阶段** 27 次 "No IMU measurements" → IMU worker 线程偶尔未及时送数到 buffer，仅 ~1.3% camera frames 受影响
+- **跟踪阶段** IMU/Camera stream drops 持续发生 → USB 等时传输实际丢帧
+
+**关键发现（时序分析法）：**
+```
+06:57 Mapping:   21  IMU drops
+07:03 Mapping:    1
+07:04 Mapping:  101
+07:07 Localization: 101
+07:10 Mapping:   151    ← Mapping 自身也在递增！
+07:22 Localization: 1641 (崩溃)
+07:49 Localization: 951
+```
+Mapping 会话的丢帧量也在随总运行时间递增（21→101→151），说明 tegra-xusb 控制器的等时传输质量随持续运行时间**单调下降**，与模式无关。
+
+**结论：**
+
+丢帧差异的主要原因不是"重定位模式本身"，而是两个因素的叠加：
+
+1. **时序因素**：D435i + tegra-xusb 随持续运行 USB 等时传输质量逐步下降（所有会话的丢帧量按时间递增）
+2. **负载因素**：重定位的额外 CPU/GPU 开销（特征匹配 + 位姿图优化）间接干扰 USB 中断调度，放大丢帧
+
+**缓解措施：**
+
+1. **禁用未使用的 D435i 流**：通过 librealsense 配置限制 depth/color 输出，减少 USB 带宽占用
+2. **D435i USB 硬重置**：每次 cuVSLAM 启动前重置 USB 设备，清空控制器累积状态
 
 ## 待确认 / Next Steps
 
@@ -305,6 +355,9 @@ RealSense D435i USB 3.0 → Jetson tegra-xusb 控制器
 5. ~~降低 D435i 流参数（30fps）~~ ❌ 无效
 6. ~~L1 IMU 桥接旋转校正~~ ❌ 失败
 7. ~~Go2 机体 IMU 绝对偏航~~ ❌ 跳变更严重
-8. [ ] **待探索：** USB 抓包分析 jetson xusb 控制器行为——确认是硬件限�还是驱动问题
-9. [ ] **待探索：** powered USB hub 或外接 USB 控制器绕过 on-chip xusb
-10. [ ] **待探索：** 放弃 cuVSLAM VIO，改用 Point-LIO（LiDAR-IMU 紧耦合）+ L1 IMU
+8. [x] ~~用 `is_localized` 守卫跑一轮重定位巡航~~ ✅ 位姿跳变已基本消除（接近无重定位效果）
+9. [ ] **待验证：** 禁用 depth/color 流 + USB 重置是否能降低 IMU 丢帧
+10. [ ] **待测试：** 如果丢帧改善，评估是否需要重建重定位地图（现有地图建图时有 IMU 丢帧）
+11. [ ] **待排查：** 重定位时的 CUDA 崩溃（`nanobind` 泄漏 + `error driver shutting down`）
+12. [ ] **待探索：** USB 抓包分析 jetson xusb 控制器行为
+13. [ ] **待探索：** powered USB hub 或外接 USB 控制器绕过 on-chip xusb
