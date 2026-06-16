@@ -318,3 +318,18 @@ cuVSLAM 启动（加载地图）
 6. ~~L1 IMU 桥接旋转校正~~ ❌ 失败
 7. ~~Go2 机体 IMU 绝对偏航~~ ❌ 跳变更严重
 8. ~~用 `is_localized` 守卫跑一轮重定位巡航~~ ✅ 位姿跳变已基本消除
+
+---
+
+## Round 11: IMU/Camera 双时钟域对齐（进行中）
+
+**问题：** 经单跑 cuVSLAM 主栈并插入 log 发现，D435i 的 Motion Module（IMU）和 Stereo Module（Camera）是两个独立硬件模组，各自有独立时钟域。两路 `rs.pipeline()` 实例各自独立校准 `hardware_clock → global_time` 映射，导致 camera 和 IMU 时间戳实际锚定在不同参考系。SLAM 融合了两个不同时钟域的数据。这很可能是导致 IMU 丢帧、位姿跳变的根本原因。
+
+**关键改动：**
+- `configure_device_timestamps()`：在 pipeline 启动前对所有 sensor 设 `global_time_enabled=1`，强制 SDK 统一映射到 Jetson 主机 CLOCK_REALTIME
+- 两路 pipeline 时间戳均投射到 `host CLOCK_MONOTONIC`（`-real_to_mono_offset`）
+- IMU 使用 MCU capture time（`frames[0].timestamp`, hardware_clock 域）+ 一次性校准偏置 `hw_to_mono_offset`，精度取决于 camera 与 IMU 校准帧的时间差
+
+**验证：** `reg_imu=0` 从持续出现降至偶发，但校准误差（~17ms）仍未消除。目前还没有彻底解决。
+
+相机使用的是 jetson capture time（NTP 同步到 2026年），IMU 使用的是 MCU capture time（1970年）。目前的校准方法是对 IMU arrval time（jetson monotonic）和 IMU capture time（MCU hardware_clock）进行一次性校准，得到一个固定偏置 `hw_to_mono_offset`，然后所有 IMU 数据都通过 `imu_mono_ts = imu_hw_ts + hw_to_mono_offset` 投射到 jetson monotonic 域。由于 camera 和 IMU 的 capture time 是独立的，且校准帧的时间差可能较大（17ms），所以存在一定的时间误差。目前我感觉这个方法没有根本性解决问题，后续可能需要更深入的 SDK 修改，强制 camera 和 IMU 的 capture time 使用同一个时钟域，或者在 SDK 层面提供更精确的同步机制。
