@@ -294,8 +294,6 @@ cuVSLAM 启动（加载地图）
 
 在桥接 `elif self._pose_ok(pose):` 前加 `is_localized and` 守卫，确保非定位态位姿永远不会通过 `_pose_ok` 发布。另修复了 `_R_total_lm` 竞态条件和新增 TF 心跳机制。
 
-> 原因是状态机引入了过多的隐式逻辑（LOST→清空 map_points、SUCCEEDED→强制接受位姿），与后续的逐步置信初始化方案存在设计冲突。改用全新的 PENDING→CONFIRMED 状态机替代。
-
 **遗留问题：**
 - 重定位 session 6/7 的 CUDA 崩溃可能与内存泄漏或长时间 relocalization 尝试有关（日志显示 `nanobind` 引用泄漏）
 - 地图 `realsense_stereo_slam_20260601_151246` 建图时已有 IMU 丢帧，地图质量存疑
@@ -333,3 +331,18 @@ cuVSLAM 启动（加载地图）
 **验证：** `reg_imu=0` 从持续出现降至偶发，但校准误差（~17ms）仍未消除。目前还没有彻底解决。
 
 相机使用的是 jetson capture time（NTP 同步到 2026年），IMU 使用的是 MCU capture time（1970年）。目前的校准方法是对 IMU arrval time（jetson monotonic）和 IMU capture time（MCU hardware_clock）进行一次性校准，得到一个固定偏置 `hw_to_mono_offset`，然后所有 IMU 数据都通过 `imu_mono_ts = imu_hw_ts + hw_to_mono_offset` 投射到 jetson monotonic 域。由于 camera 和 IMU 的 capture time 是独立的，且校准帧的时间差可能较大（17ms），所以存在一定的时间误差。目前我感觉这个方法没有根本性解决问题，后续可能需要更深入的 SDK 修改，强制 camera 和 IMU 的 capture time 使用同一个时钟域，或者在 SDK 层面提供更精确的同步机制。
+
+**最终解决：** 将机器狗本体联网，同步了本体和 jetson 的系统时间，实现了 IMU 和 Camera 的时间戳完全对齐。后续可以考虑在 SDK 层面提供更友好的时钟域同步选项，避免用户需要手动校准和调整。
+
+## Round 12：Realsense D435i 掉帧问题
+
+**问题：** 因未知原因，master branch 和 debug branch 的 cuVSLAM 重定位测试 session 中，日志显示 camera 帧降到了30+fps（而非预期的60fps）。USB 速率和裸跑相机帧率，均正常；cuVSLAM 重定位模式和非重定位的建图模式帧率均下降40-50%。
+
+**诊断：** 
+1. 相机 USB 重新拔插后，udev 规则中 autosuspend 被启用，导致相机每隔一段时间就进入低功耗模式，丢帧严重。
+2. 原始累计点云建图方案耦合在 headless 主栈，大量数据在 dds 被广播，增加了系统负载，加剧了掉帧问题。
+
+**解决：** 
+1. 修改 Jetson 的相关 udev 规则和 `/sys/bus/usb/devices/2-1/power/control`，针对 D435i 禁用 USB autosuspend。但还是存在问题，即设备重新拔插依然会恢复到默认的 autosuspend 模式，需要在每次拔插后手动修改一次。持久化方案可以考虑修改 start 外围脚本，在启动前自动设置禁用 autosuspend，或写 systemd 服务监控设备状态并自动调整。目前采用后者，如果后续考虑兼容性和稳定性，可以考虑类似前者的其他自动化方案，强制禁用特定设备的 autosuspend，避免用户需要手动干预。
+
+2. 将累计点云建图方案从 headless 主栈中剥离，改为独立的外围脚本进行提前建图，保存在一个 ply 文件中。主栈通过该 ply 文件加载地图，rviz 处只低频显示该 ply 文件的可视化结果，避免了大量点云数据在 dds 中广播，降低了系统负载，减少了掉帧问题的发生。
