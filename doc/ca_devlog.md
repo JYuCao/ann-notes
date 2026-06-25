@@ -3,26 +3,29 @@
 ## 文件调用链
 
 ```
-system_cuvslam_cruise_headless.sh
-└── ros2 launch vehicle_simulator system_cuvslam_cruise_headless.launch
+system_cuvslam_cruise_route_planner_headless.sh
+└── ros2 launch vehicle_simulator system_cuvslam_cruise_with_route_planner.launch
     ├── mapping_cuvslam.launch
-    │   ├── transfrom_everything (L1 点云预处理)
-    │   └── cuvslam_ros_bridge (cuVSLAM UDP -> ROS 桥接)
+    │   ├── transform_everything (L1 点云预处理)
+    │   └── cuvslam_ros_bridge (cuVSLAM UDP → ROS 桥接)
+    ├── local_planner_cruise.launch
+    │   ├── localPlanner （订阅 /terrain_map 做局部路径规划）
+    │   └── pathFollower (路径跟踪)
     ├── terrain_analysis.launch
     │   └── terrainAnalysis
-    ├── local_planner_cruise.launch
-    │   ├── localPlanner （订阅 /terrain_map 做路径规划）
-    │   └── pathFollower (路径跟踪)
+    ├── terrain_analysis_ext.launch
+    │   └── terrainAnalysisExt (扩展地形，供 far_planner 使用)
+    ├── far_planner.launch
+    │   └── farMaster (全局路径规划，config=cuvslam_go2)
     ├── joy_node
-    └── static_transform_publisher x2 (map->camera_init, aft_mapped->sensor)
+    └── static_transform_publisher x3 (map, aft_mapped→sensor, aft_mapped→camera_link)
 ```
 
 ## 开发日志
 
 ### 下一步计划
 
-1. feat：尝试使用 terrain_map/cuVLSAM 点云进行静态建图与地图更新。
-2. feat：基于静态地图进行重定位校准。
+1. 重定位效果不好，位姿偶发闪现glo
 
 ### filter box
 
@@ -102,63 +105,157 @@ world
 
 ### 静态建图
 
-> exp: 将 /landmarks 坐标与现有坐标系对齐，查看点云效果。
-> * 最新发现 /landmarks 无法用于稠密地图重建: rviz 中 /landmarks 的点云十分稀疏（单帧数十个点），累计点云 /final_landmarks 几乎看不出地形；官方 [github discussion](https://github.com/nvidia-isaac/cuVSLAM/discussions/28) 中 maintainer 回复 cuVSLAM 几乎不产生稠密点云，如需要视觉稠密建图建议尝试 nvblox。
+> cuVSLAM 几乎不产生稠密点云（稀疏地标，无法用于地形重建），因此基于 L1 雷达点云经 terrainAnalysis 处理后的 `/terrain_map` 进行全局累积建图。
 
-feat: 尝试使用 terrain_map（L1 雷达点云经 terrainAnalysis 处理后）进行全局累积建图。
-
-桥接 `terrain_map_cb` 中解析 `xyz` 一次，同时喂给滑动窗口和全局累积，避免重复解析：
+#### 数据流
 
 ```
 terrain_map_cb (parse xyz once)
-├── map_points                  # 滑动窗口（20m radius, 30k max, leaf=0.10）
-│   └── /registered_map (1 Hz)  # 避障用局部地图
-└── _global_points              # 全局累积（leaf=0.05, 2M cap）
-    ├── _global_buffer: list    # 每帧 append，攒够 10 帧才 np.vstack 合并
-    ├── GLOBAL_CLOUD_SKIP=5     # 每 5 帧只做一次 append
-    ├── global_lock             # 独立锁，不跟 map_lock 争抢
-    └── /global_map_points (1 Hz)
+├── _global_points (np.array)       # 全局累积
+│   ├── GLOBAL_MAP_LEAF = 0.20m    # 体素分辨率
+│   ├── GLOBAL_MAP_MAX_POINTS = 500K
+│   ├── 每帧: merge → global downsample_xyzi（体素去重 + 上限截断）
+│   └── /global_map_points (TRANSIENT_LOCAL, 启动时发布一次)
+└── map_points (list)              # 滑动窗口局部地图（避障用）
+    ├── MAP_RADIUS = 20m
+    ├── MAX_MAP_POINTS = 30K
+    ├── leaf = REGISTERED_MAP_LEAF (0.10)
+    └── /registered_map (1 Hz)
 ```
 
-- 全局累积不依赖 `PUBLISH_REGISTERED_MAP` 开关，始终运行（只要 `_was_localized` 为 True）。
-- 独立 `global_lock` + list buffer 避免 `np.vstack` 每帧拷贝 2M 点阻塞主循环。
+关键实现：
+- `_global_points` 是 `np.ndarray`，每帧 `np.vstack` 合入新点后立即执行 `downsample_xyzi` 做全局体素去重（`GLOBAL_MAP_LEAF=0.20`），保证空间密度均匀。无需 `list buffer` / 独立锁。
+- `/global_map_points` 使用 `TRANSIENT_LOCAL` QoS（延迟 3s 发布一次，等待 DDS 发现完成），非 1Hz 流式发布，避免序列化开销。
+- 全局累积不依赖 `PUBLISH_REGISTERED_MAP`，只要 `_was_localized` 为 True 即运行。
 
 #### 保存/载入（PLY 文件）
 
-- **保存路径**: `$CUVSLAM_MAP_DIR/global_map.ply`
-- **`/save_map` service** (`std_srvs/Trigger`): 写入 PLY（binary_little_endian, xyz + intensity）
-- **自动保存**: `main()` 的 `finally` 块在 Ctrl+C / 异常退出时调用 `_save_global_ply()`
-- **启动载入**: `__init__` 中 `_load_global_ply()` 读取已存 PLY，合并到 `_global_points`；新累积建立在旧数据之上，`/save_map` 含新旧全部数据
-- **`static_map_publisher` 已废弃**：bridge 自身负责加载+累积+发布，无需独立节点（launch / headless.sh 已移除）
+- **保存路径**: `$CUVSLAM_MAP_DIR/global_map.ply`（建图模式）或 `last_output_dir/global_map.ply`（回退）
+- **自动保存**: `main()` 的 `finally` 块在 Ctrl+C / 异常退出时调用 `_save_global_ply()`，保存前做一次 `downsample_xyzi` 保证文件密度一致
+- **导航模式下不保存**: `CUVSLAM_MAP_DIR` 已设置时（导航/定位模式）跳过保存，防止覆盖原始完整地图
+- **启动载入**: `__init__` → `_load_global_ply()` 读取 PLY，降采样到 `GLOBAL_MAP_LEAF` 后赋值给 `_ply_pts` 和 `_global_points`
+- **无 `/save_map` service**: 仅依靠 shutdown 自动保存（简化设计）
+- **`static_map_publisher` 已废弃**: bridge 自身完成加载+累积+发布
 
-#### 当前问题
+#### 当前状态
 
-1. **点云数量过多导致卡顿**：全局点云累积到百万级时，`_publish_global_cloud` 在 1Hz 发布时触发内存拷贝与序列化，`global_lock` 持锁时间过长可能阻塞 terrain_map_cb，造成位姿估计延迟（闪烁/漂移）。
-   - 目前 GLOBAL_CLOUD_SKIP=5 已基本解决，但 2M 上限附近仍偶发。
+- **密度**: 全局均匀，≤1 点/0.20m³。50m×50m 场景约 6 万点，PLY 文件约 3MB
+- **覆盖保护**: 导航模式不写回原地图，避免地图退化
+- **性能**: 纯 numpy 操作（无 Python 级循环），单次 `downsample_xyzi` 约 10-50ms
 
-2. **位姿跳变导致累计点云混乱**：cuVSLAM 位姿在重定位/大转角时仍有微跳变（1-3cm / 0.5-1°），累积到全局点云中表现为重影/拖尾。
-   - 详见 [`pose_jump_chronicle.md`](./pose_jump_chronicle.md)（位姿跳变追踪）。
-   - 地图质量依赖位姿稳定性，需先修复位姿问题才能得到高质量累积地图。
+#### 已知限制
 
-3. **密度和重复点未充分优化**：
-   - 当前 leaf=0.05 仅在 append 时做一道体素滤波，但累积过程中不同帧的同区域点未去重。
-   - 近距离区域密度仍然过高，远距离又稀疏不均。
+1. **位姿跳变导致重影**: cuVSLAM 位姿在重定位/大转角时仍有微跳变（1-3cm / 0.5-1°），累积到全局点云表现为重影/拖尾。详见 [`pose_jump_chronicle.md`](./pose_jump_chronicle.md)。
+2. **导航模式不更新地图**: 出于保护，导航模式不做累积保存。如需增量更新需手动切建图模式或添加增量保存策略。
 
-#### 后续优化方向
+### Far Planner 全局路径规划
 
-1. **降低全局点云密度**：
-   - 增大 `GLOBAL_CLOUD_LEAF`（当前 0.05 → 0.10 或自适应）。
-   - flush 或 publish 前再做一道下采样（已有 `downsample_xyzi`）。
+feat: 将 far_planner 集成到 cuVSLAM + autonomy_stack_go2 导航栈中，实现 "RViz 设定目标点 → far_planner 生成路径 → local_planner 跟踪" 的完整闭环。
 
-2. **丢弃重合点**：
-   - 对 `_global_points` 定时执行体素滤波（而非仅在 append 时）。
-   - 根据位姿判断：机器人位姿变化小于阈值时不添加新点。
-   - 使用 Z-order / Hilbert 曲线做空间邻近去重。
+#### 架构
 
-3. **减少发布开销**：
-   - `_publish_global_cloud` 从 1Hz 降到 0.5Hz 或由位姿变化触发。
-   - 发布前用 shallow copy 替代 `copy()`（当前 pts.copy() 拷贝 32MB）。
+```
+RViz GoalpointTool (key g)
+  └── /goal_point
+      └── cruise_viz_bridge (control_source → TCP → control_sink)  # 跨网络转发
+          └── far_planner (/goal_point, frame=map)
+              ├── /way_point           → localPlanner → pathFollower → robot
+              ├── /viz_path_topic      (规划路径可视化)
+              ├── /viz_node_topic      (图节点可视化)
+              ├── /viz_graph_topic     (图拓扑可视化)
+              ├── /overall_map         (全局占据地图)
+              ├── /free_paths          (搜索空间可视化)
+              └── /far_reach_goal_status (是否可达)
+```
 
-4. **修复位姿跳变**：
-   - 位姿跳变问题是静态地图质量的根本瓶颈，优先解决后其他优化才生效。
-   - 当前桥接中对位姿做偶数帧过滤已降低抖动频率，但绝对精度仍需 cuVSLAM 参数调优。
+两种操作模式：
+- **Direct waypoint** → `/way_point` → localPlanner（绕过 far_planner）
+- **Goal** → `/goal_point` → far_planner → `/way_point` → localPlanner
+
+#### 文件变更
+
+| 文件 | 变更 |
+|------|------|
+| `far_planner/launch/far_planner.launch` | 新增 `rviz`(IfCondition)、`rviz_config` arg |
+| `far_planner/config/cuvslam_go2.yaml` | GO2 专用配置（`voxel_dim=0.15`, `sensor_range=8.0`, `robot_dim=0.5`） |
+| `far_planner/src/far_planner.cpp` | 添加 1Hz 日志速率限制 (`should_log` 计数器) |
+| `vehicle_simulator/launch/system_cuvslam_cruise_with_route_planner.launch` | 集成 far_planner + terrain_analysis_ext |
+| `transform_sensors/cruise_viz_bridge.py` | 添加 `/goal_point` 控制话题、far_planner 可视化话题(Marker/MarkerArray/Bool/PointCloud2)、cancel 话题 |
+| `goalpoint_rviz_plugin/src/goalpoint_tool.cpp` | 快捷鍵 `w`→`g`（避免与 WaypointTool 冲突） |
+| `vehicle_simulator.rviz` | 新增 GoalpointTool 插件、GoalPoint/GlobalPath 显示 |
+| `system_cuvslam_cruise_route_planner_headless.sh` | headless 启动脚本，含 `sync_runtime_overlay` |
+
+#### 边界可视化问题
+
+`/navigation_boundary` 在单机器人模式下始终为空，因为 `is_boundary` 仅在多机器人模式下被设为 true。尝试过两种修复（全局 is_boundary=true、基于多边形的 boundary 构建）均导致路径规划退化（原本可达区域变成不可达）。结论：单人机模式下 live without boundary。
+
+#### key 配置参数
+
+```yaml
+far_planner:
+  ros__parameters:
+    main_run_freq: 5.0
+    voxel_dim: 0.15          # 图搜索体素分辨率
+    robot_dim: 0.5           # 机器人尺寸（路径规划用）
+    sensor_range: 8.0        # 传感器范围
+    terrain_range: 6.0       # 地形图范围
+    local_planner_range: 3.0 # local planner 覆盖半径
+    world_frame: map
+```
+
+### PLY 地图保护与降采样优化
+
+#### 地图覆盖问题
+
+**问题**：导航模式下（`CUVSLAM_MAP_DIR` 已设置），`_save_global_ply()` 在 shutdown 时将 `_global_points`（仅包含本次运行观测到的区域）保存到 `CUVSLAM_MAP_DIR/global_map.ply`，**覆盖**了原始完整的地图文件。下次启动加载的就是不完整的地图。
+
+**修复**：`CUVSLAM_MAP_DIR` 已设置时跳过保存，仅记录 log：
+
+```python
+if CUVSLAM_MAP_DIR:
+    self.get_logger().info("skipping save to preserve loaded map")
+    return
+```
+
+#### 密度优化
+
+**问题**：全局点云 `_global_points` 以 `leaf=0.05` 累积，`downsample_xyzi` 的早期返回(`if shape[0] <= max_points: return`)导致体素滤波仅在超上限时执行，跨回调重复点不断堆积，空间密度不均匀（反映机器人经过次数而非真实几何）。
+
+**管道分辨率链**：
+
+| 阶段 | 分辨率 | 消费者 |
+|------|--------|--------|
+| Raw L1 lidar | ~0.02m | — |
+| terrain_analysis planarVoxelSize | **0.2m** | 高程网格 |
+| terrain_analysis terrainVoxelSize | **1.0m** | 地形网格 |
+| far_planner voxel_dim | **0.15m** | 图搜索 |
+| bridge _global_points (旧) | **0.05m** ← 16倍冗余 | PLY 保存 |
+| bridge _global_points (新) | **0.20m** | PLY 保存 |
+
+**修复**：
+1. `GLOBAL_MAP_LEAF = 0.20`（环境变量可覆写），匹配 terrain_analysis 最细网格，16× 点量减少
+2. `GLOBAL_MAP_MAX_POINTS = 500000`（之前 2M → 随机 1.5M）
+3. 移除 `downsample_xyzi` 的早期返回，每次调用都先做体素滤波再截断上限
+4. `terrain_map_cb` 合入新点后调用 `downsample_xyzi(self._global_points, 0.20, 500K)` 保证全局均匀
+5. `_load_global_ply` / `_save_global_ply` 统一使用相同 leaf
+
+**效果**：PLY 文件从 ~50MB 降至 ~3MB（50m×50m 场景），空间密度完全均匀（≤1点/0.20m³），不损失下游消费者所需信息。
+
+### Local Planner 配置
+
+**问题**：`local_planner.launch` 默认参数激进（`maxYawRate=80°s`、`yawRateGain=1.5`），90°/180° 转弯时离墙太近。
+
+**修复**：切换到 `local_planner_cruise.launch`（已有更柔和的默认值），保持 `local_planner.launch` git restore 恢复原样。
+
+| 参数 | `local_planner.launch` | `local_planner_cruise.launch` |
+|------|----------------------|-----------------------------|
+| `maxYawRate` | 80.0°/s | 20.0°/s |
+| `yawRateGain` | 1.5 | 0.3 |
+| `maxAccel` | 2.0 m/s² | 0.8 m/s² |
+| `dirDiffThre` | 0.4 rad | 0.6 rad |
+| `dirWeight` | 0.02 | 0.15 |
+| `lookAheadDis` | 0.5 m | 0.5 m |
+| `pointPerPathThre` | 2 | 10（过松，待调） |
+| `autonomySpeed` | 1.0 m/s | 0.22 m/s（系统覆写 0.25） |
+
+**仍存在的问题**：`pointPerPathThre=10` 意味着一个路径需要 10 个障碍点才被阻塞，转弯时容易贴墙。`local_planner_cruise.launch` 中为硬编码值，未暴露为可覆写 arg。
