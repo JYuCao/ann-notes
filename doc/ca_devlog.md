@@ -23,10 +23,6 @@ system_cuvslam_cruise_route_planner_headless.sh
 
 ## 开发日志
 
-### 下一步计划
-
-1. 重定位效果不好，位姿偶发闪现glo
-
 ### filter box
 
 filter box 是 src/utilities/transform_sensors/transform_sensors/transform_everything.py 中的一个功能模块，用于屏蔽掉机器狗自身的点云数据，以避免在避障和路径规划过程中受到干扰。
