@@ -1,432 +1,299 @@
-﻿# Fast-Slow Test-Time Adaptation for Online Vision-and-Language Navigation
+# Fast-Slow Test-Time Adaptation for Online Vision-and-Language Navigation
 
-**Junyu Gao, Xuan Yao, Changsheng Xu, ICML 2024**  
-**关键词：** Online VLN, Test-Time Adaptation, Fast-Slow Update, Stability–Plasticity, Continual Adaptation
+> Junyu Gao, Xuan Yao, Changsheng Xu. ICML 2024.
+>
+> 论文：[PMLR](https://proceedings.mlr.press/v235/gao24p.html) ｜ [arXiv](https://arxiv.org/abs/2311.13209) ｜ [官方代码](https://github.com/Feliciaxyao/ICML2024-FSTTA)
 
-## 1\. 核心问题与主要思想
+**关键词：** Online VLN、Test-Time Adaptation、Fast-Slow Update、Stability-Plasticity、Continual Adaptation
 
-FSTTA 面向在线 Vision-and-Language Navigation（VLN），关注训练完成的导航模型如何在测试过程中利用持续到来的无标签数据进行适应。与普通图像分类 TTA 不同，VLN 同时存在两个时间尺度：一个 navigation sample / instruction 内包含连续多个 action decisions，即 **intra-sample multi-step structure**；不同导航任务又以 sample 为单位持续到达，构成 **inter-sample sequential structure**。如果过于频繁地根据单步测试数据更新，虽然适应快，但容易产生参数漂移、错误累积和 catastrophic forgetting；如果更新过慢或频繁 reset，又无法积累新的测试经验。因此论文将问题归纳为 **adaptability–stability dilemma**，并设计 Fast-Slow 双时间尺度机制：Fast Update 处理当前 episode 内的快速适应，Slow Update 负责跨 episode 的长期经验整合。
+## 1. 一句话总结
 
-VLN 模型在第 $t$ 步根据语言指令 $I$、视觉特征 $R_t$、物体特征 $O_t$ 和历史 $H_t$ 输出
+FSTTA 用两个时间尺度处理在线 VLN 的稳定性—可塑性矛盾：在一个 episode 内，每隔若干动作聚合近期梯度，快速适应当前环境；跨多个 episodes，则分析 Fast 模型的参数轨迹，将反复出现的变化方向写入较稳定的 Slow 模型。
 
-$$s_t=\phi(I,R_t,O_t,H_t;\Theta),\qquad s_t\in\mathbb R^{|V_t|}$$ 
+其核心可以概括为：
 
-其中 $s_t$ 是当前 navigable nodes 和 STOP 的动作概率分布。在 graph-based VLN 中，action 可以近似理解为选择下一个 navigable node，但 instruction 本身并不是预先分解成 node sequence，trajectory 是 agent 在执行过程中动态产生的。
+$$
+\boxed{\text{Fast：梯度一致性} + \text{Slow：参数轨迹巩固}}
+$$
 
-测试时没有 ground-truth action，因此论文采用 entropy minimization：
+## 2. 问题设定与适应信号
 
-$$L(s_t;\Theta)=-\sum_i s_{t,i}\log s_{t,i}, \qquad g_t=\nabla_\Theta L(s_t;\Theta).$$
+在线 VLN 同时包含两种序列结构：
 
-该 loss 通过降低动作分布熵使模型更加确定，但它只优化 confidence，并不知道预测是否正确，因此存在“更自信地犯错”的风险。FSTTA 后续的核心并不是重新设计 loss，而是判断这些无监督梯度中哪些部分更值得相信。实验中只更新最后四个 LayerNorm 的 affine parameters，其余网络冻结，以降低测试时计算量和参数漂移风险。
+- **样本内（intra-sample）：** 一条指令需要连续执行多步动作；
+- **样本间（inter-sample）：** 不同指令或 episodes 按时间顺序持续到达。
 
-## 2\. Fast Update：短时间尺度的梯度分析
+频繁更新有较强可塑性，但容易造成错误累积和参数漂移；更新太慢又难以及时适应新环境。FSTTA 因此分别在 action-step 和 sample/episode 两个尺度上更新。
 
-Fast Update 每 $M$ 个 action steps 收集一次梯度，实验中 $M=3$。将最近梯度写成
+在第 $t$ 个动作步，基础 VLN 模型根据指令 $I$、全景视觉特征 $R_t$、物体特征 $O_t$ 和历史 $H_t$，输出当前可导航节点（含 STOP）的概率：
 
-$$G_j=\begin{bmatrix}g_1^T \\ \vdots \\ g_M^T\end{bmatrix}\in\mathbb R^{M\times D}$$
+$$
+\mathbf{s}_t = \phi(I,R_t,O_t,H_t;\Theta),
+\qquad
+\mathbf{s}_t \in \mathbb{R}^{|V_t|}.
+$$
 
-先计算平均梯度 $\bar{g}_j$，再中心化得到 $\hat{G}_j$，随后构造梯度协方差
+测试阶段没有动作标签，论文使用预测熵作为无监督目标：
 
-$$C_j=\frac{1}{M-1}\hat{G}_j^T\hat{G}_j$$
+$$
+\mathcal{L}(\mathbf{s}_t;\Theta)
+= -\sum_i s_{t,i}\log s_{t,i},
+\qquad
+\mathbf{g}_t = \nabla_{\Theta}\mathcal{L}(\mathbf{s}_t;\Theta).
+$$
 
-并进行 SVD / eigendecomposition：
+熵最小化只会提高置信度，并不能保证动作正确；FSTTA 的重点不是改变该 loss，而是从多个梯度和参数状态中提取相对可靠的更新方向。实验只更新基础模型最后四个 LayerNorm 的仿射参数，其余参数冻结。
 
-$$\lambda_{j,d},u_{j,d}=\mathrm{SVD}_d(C_j)$$
+## 3. Fast Update：样本内梯度一致性
 
-其中 $u_{j,d}\in\mathbb R^D$ 表示参数空间中的正交变化方向，$\lambda_{j,d}$ 表示最近几个梯度沿该方向的方差。Fast 阶段假设：短时间窗口内，多个 action steps 虽然动作与观测不同，但由于共享同一 instruction、environment 和相邻视觉状态，其中可能存在共同的 test-distribution adaptation direction；因此低方差方向代表较高 gradient agreement，而高方差方向更可能是 step-specific 或 noisy component。这个判断只是建模假设，因为真实的 step-specific adaptation 也可能表现为高方差。
+### 3.1 梯度分解—累积
 
-作者将平均梯度投影到各个 SVD 方向，并使用特征值倒数重新加权：
+每隔 $M$ 个动作执行一次 Fast Update。第 $j$ 次更新收集最近 $M$ 个梯度：
 
-# [  
-\nabla_j^{fast}
+$$
+G_j =
+\begin{bmatrix}
+\tilde{\mathbf{g}}_{j,1}^{\top}\\
+\vdots\\
+\tilde{\mathbf{g}}_{j,M}^{\top}
+\end{bmatrix}
+\in \mathbb{R}^{M\times D},
+\qquad
+\bar{\mathbf{g}}_j = \frac{1}{M}\sum_{m=1}^{M}\tilde{\mathbf{g}}_{j,m}.
+$$
 
-\sum_d  
-\frac{1}{\lambda_{j,d}}  
-\langle \bar g_j,u_{j,d}\rangle u_{j,d}.  
-]
+中心化后计算梯度协方差并分解：
 
-因此低方差的一致方向被增强，高方差的冲突方向被抑制。为了避免 $1/\lambda_d$ 改变整体梯度尺度，又进行 norm calibration：
+$$
+\hat{G}_j = G_j - \mathbf{1}\bar{\mathbf{g}}_j^{\top},
+$$
 
-[  
-\nabla_j^{fast}  
-\leftarrow  
-\frac{\nabla_j^{fast}|\bar g_j|_2}  
-{|\nabla_j^{fast}|_2},  
-]
+$$
+(\lambda_{j,d},\mathbf{u}_{j,d})
+= \operatorname{SVD}_d\!\left(
+\frac{1}{M-1}\hat{G}_j^{\top}\hat{G}_j
+\right).
+$$
 
-使处理后的梯度保持与平均梯度相近的总体 magnitude，主要改变方向组成而不是任意放大 update size。
+$\lambda_{j,d}$ 越大，表示最近梯度沿 $\mathbf{u}_{j,d}$ 的变化越大、步间一致性越低。论文用特征值倒数压低这些高方差方向：
 
-从线性代数角度看，因为中心化后的 $M$ 个梯度满足和为零，所以
+$$
+\nabla_j^{\mathrm{fast}}
+= \sum_{d=1}^{D}
+\frac{1}{\lambda_{j,d}}
+\left\langle \bar{\mathbf{g}}_j,\mathbf{u}_{j,d}\right\rangle
+\mathbf{u}_{j,d}.
+$$
 
-[  
-\mathrm{rank}(\hat G_j)\le M-1.  
-]
+再将梯度范数校准到平均梯度的范数，使该操作主要改变方向组成，而不任意放大更新：
 
-因此当 $M=3$ 时，即使参数空间 $D$ 很高，当前窗口最多只能估计两个独立的梯度变化方向。可以把 Fast Update 看作在高维参数空间中估计一个极低维的局部 gradient variation subspace。
+$$
+\nabla_j^{\mathrm{fast}}
+\leftarrow
+\frac{\|\bar{\mathbf{g}}_j\|_2}
+{\|\nabla_j^{\mathrm{fast}}\|_2}
+\nabla_j^{\mathrm{fast}}.
+$$
 
-### Dynamic Learning Rate Scaling
+直觉是：同一指令和相邻观测产生的共同梯度方向更可能反映当前分布，变化剧烈的方向更可能包含 step-specific noise。不过这只是建模假设；环境真正发生突变时，高方差也可能是有用信号。
 
-Fast Update 还利用所有特征值之和
+> **数值实现注意：** 由于 $\operatorname{rank}(\hat{G}_j)\le M-1$，当论文默认 $M=3$ 时，协方差至多有两个非零特征值，直接计算 $1/\lambda_{j,d}$ 会遇到零特征值。实际实现需使用低秩分解、截断或 $1/\max(\lambda_{j,d},\varepsilon)$；官方仓库当前代码使用 $\varepsilon=10^{-6}$。
 
-[  
-\sigma_j=\sum_d\lambda_{j,d}  
-]
+### 3.2 Dynamic Learning Rate Scaling（DLR）
 
-衡量当前梯度窗口的总体变化强度，并通过 EMA 维护历史基准 $\bar\sigma$。学习率为
+用协方差的迹衡量当前窗口的总体梯度变化：
 
-# [  
-\gamma_j^{fast}
+$$
+\sigma_j
+= \operatorname{Tr}\!\left(
+\frac{1}{M-1}\hat{G}_j^{\top}\hat{G}_j
+\right)
+= \sum_d \lambda_{j,d}.
+$$
 
-\mathrm{Trunc}  
-\left(  
-1+\tau-|\sigma_j-\bar\sigma|  
-\right)  
-\hat\gamma^{fast}.  
-]
+历史基准通过 EMA 更新：
 
-当当前梯度方差与历史正常水平差异较大时，作者认为该更新更异常，因此降低 learning rate；差异较小时则允许略大的更新。实验中 $\tau=0.7,\rho=0.95$，缩放被截断在 $[0.9,1.1]$，基础 fast learning rate 为 $6\times10^{-4}$，因此 DLR 实际上是一种较保守的步长调节机制。最终：
+$$
+\bar{\sigma}
+\leftarrow
+\rho\bar{\sigma}+(1-\rho)\sigma_j.
+$$
 
-[  
-\Theta_j=\Theta_{j-1}-\gamma_j^{fast}\nabla_j^{fast}.  
-]
+当前方差偏离历史水平越多，Fast 学习率越小：
 
-Fast Update 可以概括为：**利用短窗口梯度一致性判断更新方向是否可靠，再根据当前窗口相对历史的异常程度控制更新幅度。**
+$$
+\gamma_j^{\mathrm{fast}}
+= \operatorname{Trunc}_{[a,b]}\!\left(
+1+\tau-|\sigma_j-\bar{\sigma}|
+\right)\hat{\gamma}^{\mathrm{fast}}.
+$$
 
-## 3\. Slow Update：跨 Sample 的参数轨迹分析
+最终更新为：
 
-Fast Update 提高了短期适应能力，但如果模型持续依赖无监督 entropy gradient 更新，长期仍可能发生 parameter drift。因此 Slow Update 不再分析瞬时梯度，而是分析一段时间内模型经过 Fast Adaptation 后形成的 **parameter trajectory**。每个 sample 完成后保存最终 fast-adapted state $\Theta_{o,J_o}$，每 $N=4$ 个 samples 进行一次 Slow Update，并额外加入上一次 Slow state (\Theta_{$l-1$}) 作为历史锚点。
+$$
+\Theta_j
+= \Theta_{j-1}
+- \gamma_j^{\mathrm{fast}}\nabla_j^{\mathrm{fast}}.
+$$
 
-对这些 parameter states 求均值、中心化并计算协方差：
+默认 DUET 配置为 $M=3$、$\tau=0.7$、$\rho=0.95$、$[a,b]=[0.9,1.1]$、$\hat{\gamma}^{\mathrm{fast}}=6\times10^{-4}$。因此 DLR 只是一个较保守的步长调节器。
 
-[  
-\frac1N\hat{\mathcal M}_l^T\hat{\mathcal M}_l,  
-]
+## 4. Slow Update：样本间参数轨迹巩固
 
-随后做 SVD：
+Fast Update 能快速适应，但长期依赖无监督梯度仍会累积误差。为此，每个样本 $o$ 结束后，FSTTA 保存其最终 Fast 状态 $\Theta_{o,J_o}$；每处理 $N$ 个样本，执行一次 Slow Update。
 
-# [  
-$\epsilon_{l,d},z_{l,d}$
+第 $l$ 个 Slow 窗口包含 $N+1$ 个状态：上一 Slow 状态作为锚点，加上 $N$ 个 Fast 终态：
 
-\mathrm{SVD}_d  
-\left(  
-\frac1N\hat{\mathcal M}_l^T\hat{\mathcal M}_l  
-\right).  
-]
-
-这里 $z_{l,d}$ 表示历史参数轨迹的 principal direction，$\epsilon_{l,d}$ 表示参数沿这一方向的变化幅度。与 Fast 阶段不同，Slow 阶段把 **大方差解释为长期主要变化方向**，因此高 $\epsilon_d$ 会获得更大权重。两阶段虽然形式上都是 Centering → Covariance → SVD → Recombination，但语义相反：Fast 寻找 gradient consensus，Slow 寻找 principal parameter trajectory。
-
-由于 eigenvector 的符号 $z_d$ 与 $-z_d$ 等价，作者额外构造 recency-weighted reference direction：
-
-[  
-h_l=  
-\frac{1}{\sum_{i=0}^{N-1}q^i}  
-\sum_{n=1}^{N}  
-q^{N-n}  
-(\Theta_{\tilde l,0}-\Theta_{\tilde l,n}),  
-]
-
-实验中 $q=0.1$，因此越新的 fast-adapted parameter state 权重越大。最终 Slow direction 为
-
-# [  
-\nabla_l^{slow}
-
-\sum_d  
-\Psi_d$\epsilon_l,h_l$  
-,\mathrm{sign}  
-\big(  
-\langle h_l,z_{l,d}\rangle  
-\big)  
-z_{l,d},  
-]
+$$
+\mathcal{M}_l
+= \{\tilde{\Theta}_{l,n}\}_{n=0}^{N}
+\in \mathbb{R}^{(N+1)\times D},
+$$
 
 其中
 
-# [  
-\Psi_d$\epsilon_l,h_l$
+$$
+\tilde{\Theta}_{l,0}=\Theta^{(l-1)},
+\qquad
+\tilde{\Theta}_{l,n}
+= \Theta_{N(l-1)+n,\,J_{N(l-1)+n}}
+\quad(n\ge 1).
+$$
 
-\epsilon_{l,d}  
-\frac{|h_l|_2}{|\epsilon_l|_2}.  
-]
+对参数状态中心化，并分解参数协方差：
 
-特征值决定各主轴的重要程度，$h_l$ 决定方向符号和整体尺度。Slow Update 最终从上一稳定状态出发：
+$$
+\bar{\Theta}_l
+= \frac{1}{N+1}\sum_{n=0}^{N}\tilde{\Theta}_{l,n},
+\qquad
+\hat{\mathcal{M}}_l
+= \mathcal{M}_l-\mathbf{1}\bar{\Theta}_l^{\top},
+$$
 
-# [  
-\Theta_{$l$}
+$$
+(\epsilon_{l,d},\mathbf{z}_{l,d})
+= \operatorname{SVD}_d\!\left(
+\frac{1}{N}\hat{\mathcal{M}}_l^{\top}\hat{\mathcal{M}}_l
+\right).
+$$
 
-## \Theta_{$l-1$}
+与 Fast 阶段相反，Slow 阶段认为大特征值对应反复出现的主要参数变化，小特征值更可能是噪声，因此强化大方差主轴。
 
-\gamma^{slow}\nabla_l^{slow},  
-\qquad  
-\gamma^{slow}=10^{-3}.  
-]
+由于特征向量 $\mathbf{z}_{l,d}$ 与 $-\mathbf{z}_{l,d}$ 等价，论文用偏重近期样本的参考方向确定符号：
 
-因此 Slow 并不是简单保留最新 Fast model，而是把最近多个 short-term adaptations 当作候选经验，通过参数轨迹分析决定哪些趋势值得长期巩固。
+$$
+\mathbf{h}_l
+= \frac{1}{\sum_{i=0}^{N-1}q^i}
+\sum_{n=1}^{N}
+q^{N-n}
+\left(\tilde{\Theta}_{l,0}-\tilde{\Theta}_{l,n}\right),
+\qquad q\in(0,1).
+$$
 
-## 4\. Fast / Slow 的核心区别
+Slow 方向为：
 
-| 
- | 
+$$
+\nabla_l^{\mathrm{slow}}
+= \sum_d
+\Psi_d(\boldsymbol{\epsilon}_l,\mathbf{h}_l)
+\operatorname{sign}\!\left(
+\left\langle\mathbf{h}_l,\mathbf{z}_{l,d}\right\rangle
+\right)
+\mathbf{z}_{l,d},
+$$
 
-Fast Update
+$$
+\Psi_d(\boldsymbol{\epsilon}_l,\mathbf{h}_l)
+= \epsilon_{l,d}
+\frac{\|\mathbf{h}_l\|_2}{\|\boldsymbol{\epsilon}_l\|_2}.
+$$
 
- | 
+最后从上一 Slow 状态出发更新，而不是直接保留最新 Fast 状态：
 
-Slow Update
+$$
+\Theta^{(l)}
+= \Theta^{(l-1)}
+- \gamma^{\mathrm{slow}}\nabla_l^{\mathrm{slow}}.
+$$
 
- |
+默认 DUET 配置为 $N=4$、$q=0.1$、$\gamma^{\mathrm{slow}}=10^{-3}$。$q=0.1$ 意味着越新的 Fast 终态权重越大。
+
+## 5. Fast 与 Slow 的区别
+
+| 维度 | Fast Update | Slow Update |
 | --- | --- | --- |
-| 
+| 时间尺度 | action steps | samples / episodes |
+| 分析对象 | 梯度 | Fast 后的参数状态 |
+| 默认周期 | $M=3$ | $N=4$ |
+| 大特征值的解释 | 梯度分歧较大 | 主要参数变化轨迹 |
+| 对大特征值方向 | 抑制 | 强化 |
+| 作用 | 快速适应 | 长期稳定与经验巩固 |
+| 学习率 | 动态缩放 | 固定 |
 
-时间尺度
+两阶段形式上都是“中心化 $\rightarrow$ 协方差 $\rightarrow$ SVD $\rightarrow$ 方向重组”，但对大方差方向的解释相反。
 
- | 
+## 6. 实验设置与结果
 
-action steps
+### 6.1 设置
 
- | 
+- 数据集：REVERIE、R2R、SOON、连续环境 R2R-CE；
+- 基础模型：DUET、HM3D，R2R-CE 还使用 WS-MGMap 和 BEVBert；
+- 在线模拟：batch size 为 1，每个动作只前向一次；随机打乱测试样本后顺序输入，TTA 方法运行 5 次并报告均值；
+- 常用指标：SR（成功率）、SPL（兼顾成功与路径效率）、TL（路径长度）、NE（终点误差）、OSR（轨迹曾进入成功区域的比例）；REVERIE 另有 RGS / RGSPL 衡量远程目标定位。
 
-samples / episodes
+### 6.2 Ablation：REVERIE Val Unseen
 
- |
-| 
+| 方法 | SR $\uparrow$ | SPL $\uparrow$ |
+| --- | ---: | ---: |
+| DUET | 46.98 | 33.73 |
+| Tent（每 $M$ 步取平均梯度） | 48.60 | 34.65 |
+| Fast | 49.74 | 34.91 |
+| Fast + DLR | 49.82 | 35.34 |
+| Fast + DLR + Slow | **54.15** | **36.41** |
 
-分析对象
+结论：Fast 的梯度分解优于简单平均；DLR 带来的增益较小；加入 Slow 后 SR 从 49.82 提升到 54.15，是该消融中最大的单步增益，说明跨样本参数巩固十分关键。
 
- | 
+### 6.3 主要观察
 
-gradient
+- 在 REVERIE Val Unseen 上，DUET-FSTTA 相比 DUET 将 SR 从 46.98 提升到 54.15（$+7.17$ 个百分点），SPL 从 33.73 提升到 36.41（$+2.68$ 个百分点）。
+- FSTTA 的单指令平均耗时为 135.61 ms，DUET 为 104.84 ms，约增加 29%；但它比 SAR 的 145.53 ms 略快。性能提升并非没有测试时计算代价。
+- R2R、SOON 和 R2R-CE 上，多种基础模型总体也获得提升，说明 Fast-Slow 思路具有一定的跨数据集、跨模型泛化性；个别指标并非都改善。
+- 路径长度 TL 有时增加。论文推测在线更新改变了原有动作模式，使 agent 更可能探索或回退；这也说明策略更新会改变后续观测分布。
+- 遗忘实验中，模型先在 REVERIE Unseen 上适应，再回到 Seen 且关闭 TTA，SR 为 71.78，与论文表 3 所列基础模型 71.15 接近。但这只是一次有限 benchmark 检查，不能证明长期真实部署中不会遗忘。
 
- | 
+## 7. 局限与研究启发
 
-parameter state
+### 论文明确承认的局限
 
- |
-| 
+1. 只更新 normalization layers，不适用于没有这类层的模型；
+2. “在线”环境由打乱并顺序输入现有测试集模拟，不是真实长期机器人数据流；
+3. 测试时反向传播和 SVD 带来额外计算开销；
+4. Fast / Slow 更新频率固定，尚未根据场景变化自适应触发。
 
-周期
+### 更一般的启发
 
- | 
+- **学习信号：** 熵最小化可能让错误预测变得更自信；可进一步结合时序一致性、多模态一致性、奖励、失败检测或 world-model prediction error。
+- **时间层级：** 真实具身系统可能同时包含 frame、action、subtask、episode、environment 和 lifetime 等尺度，不应只设计单一更新周期。
+- **更新载体：** 在线学习不一定要修改主干参数，也可以更新 adapter、LoRA、policy head、外部记忆或检索状态。
+- **闭环分布漂移：** 参数影响动作，动作改变未来观测，观测又决定下一次更新：
 
-$M=3$
+$$
+\Theta_t
+\rightarrow a_t
+\rightarrow o_{t+1}
+\rightarrow \text{learning signal}
+\rightarrow \Theta_{t+1}.
+$$
 
- | 
+FSTTA 尚未显式建模这一闭环。尤其当环境发生真实 transition 时，高梯度方差可能代表重要新信息，而非噪声；因此 event-triggered update 是自然的后续方向。
 
-$N=4$
+## 8. 阅读同类工作的四个问题
 
- |
-| 
+1. **学习信号从哪里来？** FSTTA：动作分布的预测熵。
+2. **更新什么？** FSTTA：最后四个 LayerNorm 的仿射参数。
+3. **经验怎样跨时间积累？** FSTTA：样本内梯度聚合 + 样本间参数轨迹巩固。
+4. **怎样抑制错误累积和遗忘？** FSTTA：低方差梯度方向加权 + Slow 主参数轨迹更新。
 
-SVD 大方差含义
+## 9. 最终评价
 
- | 
-
-gradient disagreement
-
- | 
-
-principal parameter trajectory
-
- |
-| 
-
-大方差处理
-
- | 
-
-抑制
-
- | 
-
-强化
-
- |
-| 
-
-目标
-
- | 
-
-快速适应
-
- | 
-
-长期稳定与经验巩固
-
- |
-| 
-
-Learning rate
-
- | 
-
-dynamic
-
- | 
-
-fixed
-
- |
-
-从 embodied online learning 的角度，可以把两者理解为 **fast plasticity + slow consolidation**。
-
-## 5\. 实验指标
-
-主要指标中，\*\*SR（Success Rate）\*\*表示最终距离目标小于规定阈值的 episode 比例，反映“能否成功到达”；\*\*SPL（Success weighted by Path Length）\*\*同时考虑成功率和路径效率，因此比单独 SR 更能反映成功且高效的导航。\*\*TL（Trajectory Length）\*\*是实际路径长度，本身越短通常越好，但必须和 success 一起解释；\*\*NE（Navigation Error）\*\*是最终位置到目标的距离，越低越好；\*\*OSR（Oracle Success Rate）\*\*判断 trajectory 是否曾经进入成功区域，因此能够区分“走到附近但 STOP 失败”和“根本没走到”；REVERIE 还包括 **RGS / RGSPL**，分别衡量 remote object grounding success 及其路径效率。
-
-## 6\. 关键实验结果
-
-REVERIE Val Unseen 的 ablation 最能说明各模块的贡献：
-
-| 
-Method
-
- | 
-
-SR
-
- | 
-
-SPL
-
- |
-| --- | --- | --- |
-| 
-
-DUET
-
- | 
-
-46.98
-
- | 
-
-33.73
-
- |
-| 
-
-TENT
-
- | 
-
-48.60
-
- | 
-
-34.65
-
- |
-| 
-
-Fast
-
- | 
-
-49.74
-
- | 
-
-34.91
-
- |
-| 
-
-Fast + DLR
-
- | 
-
-49.82
-
- | 
-
-35.34
-
- |
-| 
-
-Fast + DLR + Slow
-
- | 
-
-**54.15**
-
- | 
-
-**36.41**
-
- |
-
-普通 entropy-based TTA 已能使 SR 从 46.98 提高到 48.60，说明 test-time adaptation 本身有效；加入 gradient decomposition 后进一步提高到 49.74，支持短窗口 gradient agreement filtering 的价值；DLR 对 SR 的额外提升只有 0.08，更多表现为辅助稳定作用；真正最大的增益来自 Slow Update，SR 从 49.82 提升到 54.15，因此从实验结果看，**跨 sample 的长期参数整合是整套方法最重要的性能来源之一**。
-
-与 TENT、SAR、CoTTA、EATA 等现有 TTA 方法相比，FSTTA 在 REVERIE 上取得更好的 SR/SPL，支持作者“普通 TTA 没有显式处理 VLN 的 intra-/inter-sample sequence structure”的论点。Seen/Unseen 混合实验中 TENT 甚至可能降低 baseline performance，而 FSTTA 仍保持提升，说明 online adaptation 本身并不天然有益，关键在于如何约束持续更新。
-
-在 catastrophic forgetting 实验中，原始 REVERIE Seen SR 为 71.15；模型先在 Unseen 上经历 FSTTA，再回 Seen 且不继续 adaptation 时 SR 为 71.78，说明在该 benchmark 设置下没有出现明显的灾难性遗忘。这个结果只能视为支持性证据，不能推广为真实长期机器人部署中不会遗忘。
-
-FSTTA 还在 REVERIE、R2R、SOON 和 continuous R2R-CE，以及 DUET、HM3D、BEVBert 等不同 base models 上得到总体 favorable results，说明其 Fast-Slow adaptation idea 有一定跨模型、跨数据集泛化性。部分实验中 TL 会增加，表明参数在线变化不仅改变 prediction confidence，也会改变 agent 的 exploration / backtracking 行为，从而进一步改变未来收到的数据。
-
-## 7\. 对具身在线学习最重要的启发
-
-这篇论文最值得带入后续具身在线学习研究的，不是具体的 SVD 公式，而是几个更一般的问题。
-
-首先，**在线学习的核心是 stability–plasticity trade-off**。具身 agent 必须能够根据新环境快速改变，同时又不能因为少量无标签经验破坏已有能力。FSTTA 用 Fast/Slow 两个时间尺度分别承担 adaptation 和 consolidation，这一问题会在 continual learning、lifelong learning、online VLA adaptation 和 online world model 中反复出现。
-
-其次，具身在线学习应显式考虑 **temporal hierarchy**。FSTTA 只区分 action-step 与 sample/episode 两级，但更一般的机器人系统可能同时存在 frame、action、subtask、episode、environment、lifetime 等多个尺度，不同尺度的经验可能适合写入不同类型的 memory 或 parameters。
-
-第三，需要持续追问 **learning signal 从哪里来**。FSTTA 使用 entropy minimization，但 confidence 不等于 correctness，这是其基本弱点。未来方法可以利用 temporal consistency、multimodal consistency、prediction error、reward、human feedback、failure detection 或 world-model error 等更可靠的自监督信号。
-
-第四，需要区分 **在线更新的载体**。FSTTA 只修改少量 LayerNorm parameters，但 embodied online learning 并不一定意味着每一步都做 parameter backpropagation；可更新的对象还可能包括 adapter、LoRA、policy head、external memory、retrieval state、latent world model 或完整模型。更新位置直接决定 adaptation capacity、compute、stability 和 forgetting risk。
-
-第五，真正困难的是 **experience accumulation**。单个 sample 上性能变好并不等于长期在线学习，关键在于过去经验如何影响未来，同时避免错误累积。FSTTA 的 Fast gradient aggregation + Slow parameter consolidation 是一种简单但清晰的实现：短期更新先作为临时经验，经过跨 sample 分析后再选择性写入长期状态。
-
-第六，具身数据具有典型的 **policy-induced distribution shift**。模型参数 $\Theta_t$ 决定动作 $a_t$，动作决定未来观察 $o_{t+1}$，新的观察又产生学习信号并更新 $\Theta_{t+1}$：
-
-[  
-\Theta_t\rightarrow a_t\rightarrow o_{t+1}  
-\rightarrow\text{learning signal}\rightarrow\Theta_{t+1}.  
-]
-
-因此 agent 不是被动从固定数据分布中取样，而是在主动改变自己未来会看到的数据。FSTTA 已经出现了这一现象，例如 online adaptation 会改变 trajectory length，但论文并没有系统建模这一闭环，这是进一步走向真实 embodied online learning 时必须关注的问题。
-
-最后，FSTTA 的固定 $M=3,N=4$ 暗含“固定时间窗口内的数据可以共同聚合”的假设，但环境真正发生 transition 时，高 gradient variance 可能是有效新信息而不是 noise。因此一个自然的后续方向是 **adaptive / event-triggered update**：根据 scene change、gradient similarity、uncertainty、instruction progress 或 failure signal 决定“何时学习”，而不只是研究“如何学习”。论文也将固定 update frequency 列为 limitation。
-
-## 8\. 论文局限与定位
-
-FSTTA 更准确地属于 **online / continual test-time parameter adaptation for VLN**，不能代表完整的 embodied online learning，也不能直接等同于现代 VLA online learning。论文的 online setting 是通过将现有 test samples shuffle 后 sequentially 输入来模拟，并非真实长期机器人部署；方法增加了测试时反向传播开销，只适应 normalization layers，Fast/Slow invocation frequency 也是固定的。
-
-对于 VLA，action 往往是 continuous control 或 action chunk，无法简单照搬 navigable-node entropy，因此 FSTTA 对 VLA 更有价值的是 **双时间尺度 adaptation、稳定性–可塑性、经验巩固、无标签 learning signal reliability** 等组织思想，而不是具体的 entropy loss 或 SVD weighting。
-
-## 9\. 后续阅读时可固定使用的四个问题
-
-以后读 embodied online learning / TTA / TTT / continual VLA 论文，可以固定检查：
-
-1. **Learning signal 从哪里来？** FSTTA：prediction entropy。
-    
-2. **更新什么？** FSTTA：最后四个 LayerNorm parameters。
-    
-3. **经验怎样跨时间积累？** FSTTA：短期 gradient aggregation + 长期 parameter consolidation。
-    
-4. **怎样避免错误累积和遗忘？** FSTTA：gradient agreement filtering + slow parameter trajectory analysis。
-    
-
-## 10\. 最终总结
-
-FSTTA 的形式可以概括为
-
-[  
-\text{Gradient SVD}  
-+  
-\text{Parameter SVD},  
-]
-
-但从具身在线学习角度，更重要的抽象是
-
-[  
-\boxed{  
-\text{Fast Plasticity}  
-+  
-\text{Slow Consolidation}  
-}  
-]
-
-即具身 agent 不仅需要根据当前交互快速适应，还必须决定哪些短期变化值得长期保留。实验中 Slow Update 带来的增益明显大于 DLR，也进一步说明“**如何把短期在线适应转化为长期稳定经验**”可能比单纯设计更激进的单步更新规则更值得关注。FSTTA 因此适合作为具身在线学习的入门论文：它没有解决真实 lifelong embodied learning 的全部问题，但把 learning signal、序列数据、稳定性–可塑性、经验积累和遗忘问题集中到了一个相对简洁的 VLN 框架中。
-
+FSTTA 更准确的定位是 **面向在线 VLN 的 continual test-time parameter adaptation**，而不是完整的 lifelong embodied learning，也不能直接等同于连续控制的 VLA 在线学习。它最有价值之处是把“短期适应”和“长期巩固”放进统一的梯度—参数分解框架；最明显的短板则是弱监督信号、固定时间窗口、理想化在线协议和额外计算成本。
