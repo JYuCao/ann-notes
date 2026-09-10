@@ -18,7 +18,7 @@
 > 3. 论文中的 layers 有 6 层，注意力头数为 8。
 
 ### Multi-Head Self-Attention
-
+> scaled dot-product attention，除此之外还有 dot-product attention、additive attention 等。
 $$
 Z = \text{softmax}(\frac{QK^T}{\sqrt{d_k}})V
 $$
@@ -32,9 +32,12 @@ $$
    * $ A = \text{softmax}(S) $
 3. 通过加权计算 head output：
    * $ Z = AV $
+4. 最终输出为所有 head 的输出拼接后再通过线性变换：
+   * $ Z = [Z_1, Z_2, ..., Z_h]W^O $
 
 > **为什么要使用多个 Head 而非一个？**
-> 答：每个 Head 对不同 token 的 value 进行不同的加权组合（$ Z = AV $），能够捕捉到不同的语义信息。单个 head 只产生一套 attention distribution，并在一个投影子空间中将多个位置的 Value 加权混合；多个 head 使用不同的 \(W_i^Q,W_i^K,W_i^V\)，可以并行地在不同表示子空间中建立不同的注意力模式，从而提高对多种关系的表示能力。
+> 答：每个 Head 对不同 token 的 value 进行不同的加权组合（$ Z = AV $），能够捕捉到不同的语义信息。单个 head 只产生一套 attention distribution，并在一个投影子空间中将多个位置的 Value 加权混合；多个 head 使用不同的 \(W_i^Q,W_i^K,W_i^V\)，可以并行地在不同表示子空间中建立不同的注意力模式，从而提高对多种关系的表示能力。<br>
+> *原文：Multi-head attention allows the model to jointly attend to information from different representation subspaces at different positions. With a single attention head, averaging inhibits this.*
 
 #### MHA 维度
 1. 输入维度：$X \in \mathbb{R}^{n \times d_{model}}$，其中 $n$ 为序列长度，$d_{model}$ 为模型维度。
@@ -43,8 +46,9 @@ $$
    * $W_i^K \in \mathbb{R}^{d_{model} \times d_k}$
    * $W_i^V \in \mathbb{R}^{d_{model} \times d_v}$
    * 输出维度：$Z \in \mathbb{R}^{n \times d_v}$
+> 实现上，一般会先进行 $XW$ 的矩阵乘法，然后再进行切分。也就是说 $W$ 的维度是 $d_{model} \times d_{model}$，算出 $ Q, K, V $ 后再使用`view`进行切分。
 3. 多头注意力：
-   * 将 $d_{model}$ 分为 $h$ 个 head，每个 head 的维度为 $d_k = d_v = d_{model} / h$。（通常选择 \(d_k=d_v=d_{\text{model}}/h\)，使得 \(h\) 个 head 拼接后维度恰好回到 \(d_{\text{model}}\)。理论上 $ d_k $可以不等于 $ d_v $）
+   * 将 $d_{model}$ 分为 $h$ 个 head，每个 head 的维度为 $d_k = d_v = d_{model} / h$。（通常选择 $d_k=d_v=d_{\text{model}}/h$，使得 $h$ 个 head 拼接后维度恰好回到 $d_{\text{model}}$。理论上 $ d_k $可以不等于 $ d_v $）
    * 每个 head 的输出维度为 $Z_i \in \mathbb{R}^{n \times d_v}$，将所有 head 的输出拼接后再通过线性变换得到最终输出：
      * $Z = [Z_1, Z_2, ..., Z_h]W^O \in \mathbb{R}^{n \times d_{model}}$，其中 $W^O \in \mathbb{R}^{hd_v \times d_{model}}$。
 
@@ -72,3 +76,25 @@ $$
 
 ## Decoder
 
+### Step
+* Output(Shifted Right) -> Output Embedding -> Positional Encoding
+* Masked MHA -> Cross Attention -> FFN（省略了残差连接和 LayerNorm，和 Encoder 类似）
+
+### Masked MHA
+
+* 与 Encoder 的 MHA 类似，但在计算注意力权重时，使用了一个 mask 来阻止模型在预测下一个 token 时看到未来的 token
+
+### Encoder-Decoder Attention(Cross Attention)
+
+* 接收 Encoder 的输出作为 Key 和 Value，Decoder Masked MHA 的输出作为 Query，计算注意力权重并生成新的表示
+* Decoder Cross Attention 和 Encoder MHA 都使用了一个 mask 屏蔽 BOS 和 PAD token 的注意力权重，防止模型在生成时关注到这些无效的 token
+
+> **为什么要使用 Cross Attention？**<br>
+答：让生成过程受到输入内容的条件约束。Self-Attention 关注已经生成的目标序列，而 Cross Attention 关注输入序列的编码表示。
+
+> **mask 在什么时候进行？**<br>
+答：在计算 attention 时，softmax前，将 mask 对应位置的 score 设置为 1e-9，使得 softmax 后的注意力权重为 0，从而阻止模型关注这些位置。
+
+### FFN
+
+* 与 Encoder 的 FFN 相同，对每个 token 的特征进行非线性重组
