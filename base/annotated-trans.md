@@ -1,7 +1,5 @@
 # The Annotated Transformer
 
----
-
 ## Encoder
 
 ### Step
@@ -13,7 +11,7 @@
 3. Layer Normalization -> Output Z
 
 > 1. **PostNorm 和 PreNorm 在性质上有什么区别？**
-> 答：PreNorm 梯度传播通常更稳定，尤其适合深层 Transformer；PostNorm 是原始 2017 Transformer 论文描述的结构，但深层训练通常更难一些。Annotated Transformer 代码是 PreNorm，最终额外 LayerNorm。
+> 答：PreNorm 梯度传播通常更稳定，尤其适合深层 Transformer；PostNorm 是原始 2017 Transformer 论文描述的结构，但深层训练通常更难一些。Annotated Transformer 代码是 PreNorm，最终额外 LayerNorm。(https://medium.com/@ashutoshs81127/why-pre-norm-became-the-default-in-transformers-4229047e2620)
 > 2. 要求每个 Sublayer 的输出维度与输入维度相同，以便进行残差连接。
 > 3. 论文中的 layers 有 6 层，注意力头数为 8。
 
@@ -36,7 +34,7 @@ $$
    * $ Z = [Z_1, Z_2, ..., Z_h]W^O $
 
 > **为什么要使用多个 Head 而非一个？**
-> 答：每个 Head 对不同 token 的 value 进行不同的加权组合（$ Z = AV $），能够捕捉到不同的语义信息。单个 head 只产生一套 attention distribution，并在一个投影子空间中将多个位置的 Value 加权混合；多个 head 使用不同的 \(W_i^Q,W_i^K,W_i^V\)，可以并行地在不同表示子空间中建立不同的注意力模式，从而提高对多种关系的表示能力。<br>
+> 答：每个 Head 对不同 token 的 value 进行不同的加权组合（$ Z = AV $），能够捕捉到不同的语义信息。单个 head 只产生一套 attention distribution，并在一个投影子空间中将多个位置的 Value 加权混合；多个 head 使用不同的 $W_i^Q,W_i^K,W_i^V$，可以并行地在不同表示子空间中建立不同的注意力模式，从而提高对多种关系的表示能力。<br>
 > *原文：Multi-head attention allows the model to jointly attend to information from different representation subspaces at different positions. With a single attention head, averaging inhibits this.*
 
 #### MHA 维度
@@ -52,7 +50,7 @@ $$
    * 每个 head 的输出维度为 $Z_i \in \mathbb{R}^{n \times d_v}$，将所有 head 的输出拼接后再通过线性变换得到最终输出：
      * $Z = [Z_1, Z_2, ..., Z_h]W^O \in \mathbb{R}^{n \times d_{model}}$，其中 $W^O \in \mathbb{R}^{hd_v \times d_{model}}$。
 
-> **$ W^O $ 的作用**是混合不同 head 的维度，学习这 8 个 head 的信息应该怎样组合成新的 \(d_{\text{model}}\) 维 token representation。
+> **$ W^O $ 的作用**是混合不同 head 的维度，学习这 8 个 head 的信息应该怎样组合成新的 $d_{\text{model}}$ 维 token representation。
 
 例：
 1. 输入维度：$X \in \mathbb{R}^{n \times 512}$，其中 $n$ 为序列长度。
@@ -67,8 +65,9 @@ $$
 
 ### FFN
 
-* 两层全连接网络，第一层使用 ReLU 激活函数，第二层不使用激活函数。
+* 两层全连接网络，第一层使用 ReLU 激活函数，第二层不使用激活函数。（两次 Kernal Size 为 1 的卷积，$d_{model}=512,d_{ff}=2048$）
 * 输入和输出维度相同，为 512，隐藏层维度为 2048。
+* 实现上，第一个 ReLU 后跟一次 Dropout
 * 作用：对每个 token 的特征进行非线性重组。
 
 > 为什么要先升维再降维？<br>
@@ -98,3 +97,10 @@ $$
 ### FFN
 
 * 与 Encoder 的 FFN 相同，对每个 token 的特征进行非线性重组
+
+## Embedding
+
+* X = $\sqrt{d_{model}}Emb(tokens)+PE$
+* $\sqrt{d_{model}}$用于将 embedding 调整到合适的尺度，使它和 positional encoding 相加时处于合理的数值尺度
+* 其中`Emb()`是一个矩阵$E\in\mathbb{R}^{V\times d_{model}}$，其中 $V$ 为词表大小。可以推测 input token 的维度为 $L\times V$，但实际实现是使用一个 one-hot 向量，向量每个元素是对应词表中 token 的索引，经查找对应后得到 $1\times d_{model}$ 的向量表示。
+* Encoder 的输入 Embedding 和 Decoder 的输入/输出 Embedding 共享权重矩阵 $E$，若最终输出有 softmax 层，则操作在 softmax 前进行
