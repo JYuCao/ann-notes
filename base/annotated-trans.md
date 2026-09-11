@@ -14,6 +14,8 @@
 > 答：PreNorm 梯度传播通常更稳定，尤其适合深层 Transformer；PostNorm 是原始 2017 Transformer 论文描述的结构，但深层训练通常更难一些。Annotated Transformer 代码是 PreNorm，最终额外 LayerNorm。(https://medium.com/@ashutoshs81127/why-pre-norm-became-the-default-in-transformers-4229047e2620)
 > 2. 要求每个 Sublayer 的输出维度与输入维度相同，以便进行残差连接。
 > 3. 论文中的 layers 有 6 层，注意力头数为 8。
+> 4. Norm 除了 LayerNorm 之外，还有 RMSNorm、QKNorm 等。
+> 其他机制记录：滑动窗口注意力、分组查询注意力、MLA、无位置嵌入、$\mu$子优化器
 
 ### Multi-Head Self-Attention
 > scaled dot-product attention，除此之外还有 dot-product attention、additive attention 等。
@@ -73,6 +75,8 @@ $$
 > 为什么要先升维再降维？<br>
 > 答：主要是为了给非线性变换更大的中间表示空间。原来的 512 维里混合着语法、语义、指代、实体属性等信息，升到 2048 后，网络有更大的容量去形成新的非线性特征。降维是为了保持输出维度与输入维度一致，以便进行残差连接。
 
+> 直接使用 FFN 的 Transformer 被称为稠密 Transformer，使用 MoE 的 Transformer 被称为稀疏 Transformer。
+
 ## Decoder
 
 ### Step
@@ -104,3 +108,4 @@ $$
 * $\sqrt{d_{model}}$用于将 embedding 调整到合适的尺度，使它和 positional encoding 相加时处于合理的数值尺度
 * 其中`Emb()`是一个矩阵$E\in\mathbb{R}^{V\times d_{model}}$，其中 $V$ 为词表大小。可以推测 input token 的维度为 $L\times V$，但实际实现是使用一个 one-hot 向量，向量每个元素是对应词表中 token 的索引，经查找对应后得到 $1\times d_{model}$ 的向量表示。
 * Encoder 的输入 Embedding 和 Decoder 的输入/输出 Embedding 共享权重矩阵 $E$，若最终输出有 softmax 层，则操作在 softmax 前进行
+
