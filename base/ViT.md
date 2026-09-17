@@ -1,14 +1,47 @@
 # ViT (Vision Transformer)
 
-## 简介
+以 `vit-base-patch16-224` 为例进行分析，`patch16` 代表输入图像会被切分为 `16x16` 的小块，`224` 代表输入图像的大小为 `224x224`。
 
-ViT 是 2020 年由 Google 团队提出的将 Transformer 架构应用于计算机视觉任务的模型。
+## Patch Embedding
 
-该论文最核心的结论是：当训练数据足够大时，ViT 的表现可以超过 CNN，突破 Transformer 缺少归纳偏置（inductive bias）的限制。但如果训练数据较小，ViT 的表现会比同等大小的 ResNets 差，因为 Transformer 和 CNN 相比缺少归纳偏置。
+该过程利用一个卷积核为 $16\times16$ 的 Conv2d 卷积层将输入图像切分为小块，图像被分割成 $(224/16) \times (224/16) = 14 \times 14 = 196$ 个互不重叠的小块，每个小块的大小为 $16\times16$。
 
-> **归纳偏置**：指模型在学习过程中对数据结构的先验假设。Transformer 的归纳偏置较弱，意味着它需要更多的数据来学习数据的结构和模式，而 CNN 具有更强的归纳偏置，能够更有效地捕捉图像中的局部特征。
-> CNN具有两种归纳偏置，一种是局部性（locality/two-dimensional neighborhood structure），即图片上相邻的区域具有相似的特征；一种是平移不变形（translation equivariance），$ g(f(x)) = f(g(x)) $，其中$g$代表卷积操作，$f$代表平移操作。当 CNN 具有以上两种归纳偏置，就有了很多先验信息，需要相对少的数据就可以学习一个比较好的模型。
+每个 filter 的操作：
 
-## ViT 结构
+$$
+3 \times 16 \times 16 \rightarrow 1 \times 14 \times 14
+$$
 
+同时，该卷积层有 $768$ 个 filter，因此整张图会被映射为一个 $768\times14\times14$ 的张量。
 
+后续对输出的空间维进行展平，将其转换为一个 $768\times196$ 的张量，最终进行转置得到一个形状为 $(196, 768)$ 的张量。最前面加上一个 [CLS] token，最终得到一个形状为 $(197, 768)$ 的张量。
+
+这在 Transformer 等价于 197 个 768 维的 token（单张 $224\times224$ 的图片）。
+
+## Pooler
+
+[CLS] token 已经包含了整张图片的全局信息，Pooler 通过一个线性层将 [CLS] token 映射为一个 $768$ 维的向量。最终该向量会被送入下游任务的分类器、任务头中。
+
+$$
+Pooler = \tanh(Linear(768\times768))
+$$
+
+## 其他与传统 Transformer 的区别
+
+1. 激活函数函数
+
+$$
+GeLU = 0.5x(1 + tanh[\sqrt{\frac{2}{\pi}}(x + 0.044715x^3)])
+$$
+
+2. Position Embedding：ViT 使用了**可学习**的位置编码，即
+
+$$
+PE = Embedding(197, 768)
+$$
+
+3. 只有 Encoder，没有 Decoder。
+
+## Inductive Bias
+
+CNN 的 inductive bias 是局部性和空间不变性，而 ViT 对于局部性的 inductive bias 较弱，ViT 需要更多的数据来学习图像的空间结构。
