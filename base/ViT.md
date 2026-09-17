@@ -45,3 +45,7 @@ $$
 ## Inductive Bias
 
 CNN 的 inductive bias 是局部性和空间不变性，而 ViT 对于局部性的 inductive bias 较弱，ViT 需要更多的数据来学习图像的空间结构。
+
+## 参考
+
+* [A Deep Dive into the Code of the Visual Transformer (ViT) Model](https://medium.com/data-science/a-deep-dive-into-the-code-of-the-visual-transformer-vit-model-1ce4cc05ca8d)
