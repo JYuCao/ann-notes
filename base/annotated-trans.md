@@ -107,5 +107,12 @@ $$
 * X = $\sqrt{d_{model}}Emb(tokens)+PE$
 * $\sqrt{d_{model}}$用于将 embedding 调整到合适的尺度，使它和 positional encoding 相加时处于合理的数值尺度
 * 其中`Emb()`是一个矩阵$E\in\mathbb{R}^{V\times d_{model}}$，其中 $V$ 为词表大小。可以推测 input token 的维度为 $L\times V$，但实际实现是使用一个 one-hot 向量，向量每个元素是对应词表中 token 的索引，经查找对应后得到 $1\times d_{model}$ 的向量表示。
-* Encoder 的输入 Embedding 和 Decoder 的输入/输出 Embedding 共享权重矩阵 $E$，若最终输出有 softmax 层，则操作在 softmax 前进行
+* Encoder 的输入 Embedding 和 Decoder 的输入/输出 Embedding 共享权重矩阵 $E$，操作在 softmax 前进行
+
+## Position Encoding
+
+* $PE_{(pos,2i)}=\sin{\frac{pos}{10000^{\frac{2i}{d_{model}}}}}$
+* $PE_{(pos,2i+1)}=\cos{\frac{pos}{10000^{\frac{2i}{d_{model}}}}}$
+* 位置编码过后要进行一次 Dropout
+* 相对位置编码直接建模 token 间的距离与方向，使注意力更容易学习位置关系，并具有更好的平移不变性与长度泛化能力。
 
