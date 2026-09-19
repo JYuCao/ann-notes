@@ -1,8 +1,25 @@
-# ViT (Vision Transformer)
+# ViT
+
+## 现代主流 ViT
+
+### 计划*
+
+| 路线                        | 代表                         | 你要抓的核心                                                         |
+| ------------------------- | -------------------------- | -------------------------------------------------------------- |
+| 基础架构                      | ViT                        | image → patch tokens → Transformer                             |
+| 层级 / 局部结构                 | Swin                       | window attention、shifted window、hierarchical feature map       |
+| Masked visual modeling    | BEiT / MAE                 | 把 BERT-style masking 搬到视觉；重建被遮挡信息                              |
+| Self-distillation SSL     | DINO → DINOv2 → **DINOv3** | 不依赖标签，让 ViT 学出通用语义和 dense features                             |
+| Image-text representation | CLIP / SigLIP2             | 图像表示与语言语义对齐，VLM/VLA 很常见                                        |
+| 视频 / 世界模型                 | V-JEPA2                    | 不重建 pixel，而是在 latent space 预测未来状态，和你做 embodied/world model 很接近 |
+
+重心放在 DINO 系列，然后 MAE，再迅速看 SigLIP2 / V-JEPA2；Swin 只需要知道思想。
+
+## ViT 基础架构
 
 以 `vit-base-patch16-224` 为例进行分析，`patch16` 代表输入图像会被切分为 `16x16` 的小块，`224` 代表输入图像的大小为 `224x224`。
 
-## Patch Embedding
+### Patch Embedding
 
 该过程利用一个卷积核为 $16\times16$ 的 Conv2d 卷积层将输入图像切分为小块，图像被分割成 $(224/16) \times (224/16) = 14 \times 14 = 196$ 个互不重叠的小块，每个小块的大小为 $16\times16$。
 
@@ -18,7 +35,7 @@ $$
 
 这在 Transformer 等价于 197 个 768 维的 token（单张 $224\times224$ 的图片）。
 
-## Pooler
+### Pooler
 
 [CLS] token 已经包含了整张图片的全局信息，Pooler 通过一个线性层将 [CLS] token 映射为一个 $768$ 维的向量。最终该向量会被送入下游任务的分类器、任务头中。
 
@@ -26,7 +43,7 @@ $$
 Pooler = \tanh(Linear(768\times768))
 $$
 
-## 其他与传统 Transformer 的区别
+### 其他与传统 Transformer 的区别
 
 1. 激活函数函数
 
@@ -42,10 +59,10 @@ $$
 
 3. 只有 Encoder，没有 Decoder。
 
-## Inductive Bias
+### Inductive Bias
 
 CNN 的 inductive bias 是局部性和空间不变性，而 ViT 对于局部性的 inductive bias 较弱，ViT 需要更多的数据来学习图像的空间结构。
 
-## 参考
+### 参考
 
 * [A Deep Dive into the Code of the Visual Transformer (ViT) Model](https://medium.com/data-science/a-deep-dive-into-the-code-of-the-visual-transformer-vit-model-1ce4cc05ca8d)
