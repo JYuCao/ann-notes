@@ -1,21 +1,6 @@
 # ViT
 
-## 现代主流 ViT
-
-### 计划*
-
-| 路线                        | 代表                         | 你要抓的核心                                                         |
-| ------------------------- | -------------------------- | -------------------------------------------------------------- |
-| 基础架构                      | ViT                        | image → patch tokens → Transformer                             |
-| 层级 / 局部结构                 | Swin                       | window attention、shifted window、hierarchical feature map       |
-| Masked visual modeling    | BEiT / MAE                 | 把 BERT-style masking 搬到视觉；重建被遮挡信息                              |
-| Self-distillation SSL     | DINO → DINOv2 → **DINOv3** | 不依赖标签，让 ViT 学出通用语义和 dense features                             |
-| Image-text representation | CLIP / SigLIP2             | 图像表示与语言语义对齐，VLM/VLA 很常见                                        |
-| 视频 / 世界模型                 | V-JEPA2                    | 不重建 pixel，而是在 latent space 预测未来状态，和你做 embodied/world model 很接近 |
-
-重心放在 DINO 系列，然后 MAE，再迅速看 SigLIP2 / V-JEPA2；Swin 只需要知道思想。
-
-## ViT 基础架构
+## 传统 ViT 架构
 
 以 `vit-base-patch16-224` 为例进行分析，`patch16` 代表输入图像会被切分为 `16x16` 的小块，`224` 代表输入图像的大小为 `224x224`。
 
