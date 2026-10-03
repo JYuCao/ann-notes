@@ -85,6 +85,21 @@ DINOv2、CAPI、DINOv3
 
 ## DINOv3
 
+DINOv3 基本沿用 DINOv2 的 DINO + iBOT + multi-crop + registers 框架，主要研究超大规模 SSL 的 scaling。
+
+### 1. Gram Anchoring
+
+密集特征的矛盾优化目标：高层语义任务（如分类）需要全局抽象特征，而几何任务（如深度估计、3D匹配）依赖局部细节特征。大规模训练时，模型倾向于优先优化全局表征，导致密集特征退化（如过度平滑或信息丢失）。
+
+DINOv3 保存 patch 之间的关系：$G = XX^T$，然后让 Student 的 Gram 矩阵 $G_s$ 与一个 feature 质量较好的 Teacher checkpoint $G_t$ 尽量接近，从而在全局语义和局部几何之间取得平衡。
+
+### 2. Scaling 副作用
+
+单纯扩大 ViT 模型规模和数据规模并不能稳定提高性能，尤其是 dense feature 会退化。
+
+### 3. Post-Training
+
+先训练好一个 foundation model，再通过 post-hoc adaptation 转换成不同分辨率、不同尺寸、甚至 image-text 对齐的模型。
 
 
 ### 参考
