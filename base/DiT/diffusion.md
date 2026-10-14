@@ -7,22 +7,32 @@
 ## 前向扩散（Forward Diffusion）
 
 逐渐加噪：
-$$q(x_t | x_{t-1})=\mathcal{N}(\sqrt{1-\beta_t}x_{t-1},\beta_t I)$$
+
+$$
+q(x_t | x_{t-1})=\mathcal{N}(\sqrt{1-\beta_t}x_{t-1},\beta_t I)
+$$
 
 其中，$q$ 表示人为定义的前向概率分布；$\beta_t$ 是第 $t$ 步的噪声方差，由预先设定的 noise schedule 决定；$x_{t-1}$ 是上一步的数据，$x_t$ 是当前带噪数据。
 
 定义 $\alpha_t=1-\beta_t$，重参数化后（**前向公式形式**）：
-$$ x_t = \sqrt{\alpha_t}x_{t-1}+\sqrt{1-\alpha_t}\epsilon_t $$
+
+$$
+x_t = \sqrt{\alpha_t}x_{t-1}+\sqrt{1-\alpha_t}\epsilon_t
+$$
 
 其中，$\epsilon_t\sim\mathcal{N}$为正态分布。
 
 这条公式的含义十分直接：**每一步将原本的数据稍微缩小，再加入一部分随机噪声**。缩放因子目的是防止加噪可能导致的整体方差持续增长。
 
 经过递推推导，对应的条件分布为：
-$$ q(x_t|x_0)=\mathcal{N}(\sqrt{\bar{\alpha}}x_0,(1-\hat{\alpha})I) $$
+
+$$
+q(x_t|x_0)=\mathcal{N}(\sqrt{\bar{\alpha}}x_0,(1-\hat{\alpha})I)
+$$
 
 它意味着：即使扩散过程有 1000 步，在训练时我们也不需要先计算 $x_1,x_2,\ldots,x_{t-1}$，而是可以直接从原始数据 $x_0$ 得到任意时间步的 $x_t$。
 当 $t$ 足够大，且设计的 schedule 使得 $\bar\alpha_T\approx 0$，就有：
+
 $$
 x_T\approx \epsilon\sim\mathcal N(0,I)
 $$
@@ -42,6 +52,7 @@ $$
 在已知 $x_0$ 的基础上，可以通过高斯分布的贝叶斯公式解析解以及 $q(x_{t-1}|x_t,x_0)$ 求出 $q(x_{t-1}|x_t)$。
 
 其均值经过化简，并代入前向扩散中的噪声表达式后，可以写成：
+
 $$
 \tilde\mu_t=
 \frac{1}{\sqrt{\alpha_t}}
@@ -57,12 +68,14 @@ $$
 ## Training
 
 从真实数据采样 $x_0\sim q_{\mathrm{data}}(x)$，随机选择时间步 $t\sim\mathcal U(\{1,\ldots,T\})$，随机采样噪声 $\epsilon\sim\mathcal N(0,I)$，最后根据前向公式构造：
+
 $$
 x_t=\sqrt{\bar\alpha_t}x_0+
 \sqrt{1-\bar\alpha_t}\epsilon
 $$
 
 直接使用 MSE 作为 loss：
+
 $$
 \mathcal L_{\mathrm{simple}}(\theta)=
 \mathbb E_{x_0,t,\epsilon}
@@ -77,18 +90,21 @@ $$
 ## Sampling
 
 采样阶段没有真实数据,只有一个随机初始化的：
+
 $$
 x_T\sim\mathcal N(0,I)
 $$
 
 接下来需要从 $T$ 一直迭代到 $1$。
 对每个时间步，调用网络：
+
 $$
 \hat\epsilon=
 \epsilon_\theta(x_t,t)
 $$
 
 计算反向分布均值：
+
 $$
 \mu_\theta(x_t,t)=
 \frac{1}{\sqrt{\alpha_t}}
@@ -99,6 +115,7 @@ x_t-\frac{\beta_t}{\sqrt{1-\bar\alpha_t}}
 $$
 
 然后采样：
+
 $$
 \boxed{
 x_{t-1}=
@@ -109,6 +126,7 @@ $$
 其中通常在最后一步不再添加随机噪声。
 
 这样就得到：
+
 $$
 x_T\rightarrow x_{T-1}\rightarrow
 \cdots\rightarrow x_1\rightarrow x_0
