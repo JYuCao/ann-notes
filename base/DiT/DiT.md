@@ -2,54 +2,130 @@
 
 ## 概览
 
-本文探索了一类新的基于 Transformer 的扩散模型 Diffusion Transformers (DiTs)。本文训练 latent diffusion models 时，使用 Transformer 架构替换常用的 UNet 架构，且 Transformer 作用于 latent patches 上。
+DiT（Diffusion Transformer）在 latent diffusion 中使用 Transformer 替换 U-Net，处理带噪 latent 的 patch tokens。扩散训练和反向采样的基本过程见 [Diffusion Model](diffusion.md)，连续概率路径与采样设计见 [SiT](SiT.md)。
 
-作者探索了 DiT 的缩放性，发现具有较高 GFLOPs 的 DiT 模型，通过增加 Transformer 宽度或者深度或者输入 token 数量，始终有更好的 FID 值。最大的 DiT-XL/2 模型在 ImageNet 512×512 和 256×256 的测试中优于所有先前的扩散模型，实现了 2.27 的 FID 值。
+论文的关键问题是：**Transformer 能否作为扩散模型的 Backbone，并通过增加模型计算量持续改善生成质量？**
 
-## DiT 架构
+在论文考察的模型和训练设置中，增加深度、宽度或输入 token 数量，通常能改善 FID；参数量本身不足以解释全部性能变化。DiT-XL/2 使用 CFG = 1.5 时，在 ImageNet 256×256 上达到 FID 2.27，在 512×512 上达到 3.04。这些是论文当时的结果，比较时需要同时注明分辨率、训练预算和采样设置。
 
-### Patchify
+## 1. 完整数据流
 
-1. 预训练 VAE Encoder：$ x_0 \in \mathbb{R}^{256\times 256\times 3} \rightarrow z_0 \in \mathbb{32\times 32\times 4} $
+训练时，先用预训练 VAE 编码真实图像，再在 latent 空间加噪：
 
-2. Patch Embedding：和 ViT 类似，将图片 Patchify，经过 linear Embedding，最终变为 $T$ 个 $d$ 维 tokens。再应用基于 ViT 频率的位置编码（sine-cosine）
+$$
+x_0\xrightarrow{\mathrm{VAE\ Encoder}}z_0,
+\qquad
+z_t=\sqrt{\bar\alpha_t}z_0+\sqrt{1-\bar\alpha_t}\epsilon,
+\quad \epsilon\sim\mathcal N(0,I).
+$$
 
-其中 $T$ 和 $p$ 满足 $T=(1/p)^2$.
+DiT 接收的是带噪的 $z_t$，以及时间步 $t$ 和类别标签 $y$：
 
-### DiT Block
+$$
+z_t\xrightarrow{\mathrm{Patchify+Embedding}}
+H\in\mathbb R^{N\times d}
+\xrightarrow{\mathrm{DiT\ Blocks}(t,y)}
+H'\xrightarrow{\mathrm{Linear+Unpatchify}}
+(\hat\epsilon,\hat r).
+$$
 
-为了解决 Diffusion Model 有时会处理额外的条件信息的情况（噪声时间步长 $t$，类标签 $c$，自然语言等），论文探索了四种不同的结构。
+其中 $\hat r$ 是反向过程的方差参数，不能直接理解为任意取值的协方差矩阵。采样时先从高斯 latent 开始，反向迭代得到 $\hat z_0$，最后通过 VAE Decoder 得到图像。
 
-#### In-Context Conditioning
+## 2. Patchify 与位置编码
 
-以 ViT 为基础，将时间步长 $t$ 和类标签 $c$ 作为两个额外的 token 附加到输入序列。
+对于 256×256 图像，VAE 的空间下采样倍率为 8：
 
-#### Cross-Attention Block
+$$
+x_0\in\mathbb R^{256\times256\times3}
+\longrightarrow z_0\in\mathbb R^{32\times32\times4}.
+$$
 
-将 $t$ 和 $c$ 的 Embedding 连接成一个长度为2的 Sequence，且与 image token 序列分开。添加了一个 cross-attention block，额外增添了 15% 的 GFLOPs 开销。
+设 latent 尺寸为 $H_z\times W_z\times C$，patch 边长为 $p$，则 token 数为：
 
-#### Adaptive Layer Norm(adaLN) Block
+$$
+\boxed{N=\frac{H_zW_z}{p^2}}.
+$$
 
-Adaptive Layer Norm (adaLN) Block 遵循 GAN 中的自适应归一化层，希望探索这个东西在扩散模型里面好不好用。
+每个 patch 展平后有 $p^2C$ 个元素，通过线性映射得到 $d$ 维 token，再加上固定的二维 sine-cosine 位置编码。这里用 $N$ 表示 token 数，避免与扩散总步数 $T$ 混淆。
 
-本文作者没有直接学习缩放和移位参数 $\gamma$ 和 $\beta$ ，*而是改用噪声时间步长 $t$ 和类标签 $c$ 得到*。adaLN 带来的额外的 GFLOPs 是最少的。
+例如，$32\times32$ latent 使用 $p=2$ 时，$N=256$；使用 $p=4$ 时，$N=64$。DiT-XL/2 中的 XL 表示模型规模，/2 表示 **latent patch** 的边长为 2。
 
-#### adaLN-Zero Block
+缩小 patch 会增加 token 数与计算量；自注意力的 token 两两交互部分随 $N^2$ 增长，因此模型规模和 patch 大小应放在同一计算预算下比较。
 
-有工作发现在有监督学习中，对每个 Block 的第一个 Batch Norm 操作的缩放因子进行 Zero-Initialization 可以加速其大规模训练。基于 U-Net 的扩散模型使用类似的初始化策略，对每个 Block 的第一个卷积进行 Zero-Initialization。
+## 3. DiT Block：如何注入条件？
 
-本文作者作了一些改进：除了回归计算缩放和移位参数 $\gamma$ 和 $\beta$ 之外，还回归缩放系数 
- 。
+论文比较了四种时间和类别条件的注入方式。这里的实验是 ImageNet 类别条件生成；自然语言等更长条件序列需要另行设计和验证。
 
-作者初始化 MLP 使其输出的缩放系数 $\alpha$ 全部为0，这样一来，DiT Block 就初始化为了 Identity Function。adaLN-Zero Block 带来的额外的 GFLOPs 可以忽略不计。
+### 3.1 In-Context Conditioning
 
-### Transformer Decoder
+将时间步 $t$ 和类别标签 $y$ 分别编码为两个额外 token，附加到图像 token 序列，通过 self-attention 进行交互。
 
-经过最后一个 DiT Block 后，需要将 image 的序列解码为输出噪声以及对角的协方差矩阵的预测结果。这两个输出的形状都与原始的空间输入一致。
+### 3.2 Cross-Attention Block
 
-作者在这个环节使用标准的线性解码器，将每个 token 线性解码为 $p\times p\times 2C$ 的张量，其中 $C$ 是空间输入中到 DiT 的通道数。最后将解码的 tokens 重新排列到其原始空间布局中，得到预测的噪声和协方差。
+将时间和类别 embedding 组成长度为 2 的条件序列，与图像 token 分开。图像 token 通过额外的 cross-attention 读取条件，论文设置下增加约 15% 的 GFLOPs。
+
+### 3.3 Adaptive Layer Norm（adaLN）
+
+先组合时间与类别 embedding：
+
+$$
+c=\mathrm{Embed}_{t}(t)+\mathrm{Embed}_{y}(y).
+$$
+
+通过条件网络预测 shift 和 scale，对归一化后的特征进行调制：
+
+$$
+\mathrm{adaLN}(h,c)
+=(1+\gamma(c))\odot\mathrm{LN}(h)+\beta(c).
+$$
+
+其中 LayerNorm 不使用自身可学习的 affine 参数；条件网络输出的参数在 token 维度广播。这里 $\gamma,\beta$ 是条件调制参数，与扩散噪声 schedule 中的 $\beta_t$ 含义不同。
+
+### 3.4 adaLN-Zero
+
+adaLN-Zero 进一步为两个残差分支预测 gate：
+
+$$
+\begin{aligned}
+h'&=h+g_{\mathrm{attn}}(c)\odot
+\mathrm{Attention}\!\left(
+(1+\gamma_{\mathrm{attn}}(c))\odot\mathrm{LN}(h)
++\beta_{\mathrm{attn}}(c)\right),\\
+h''&=h'+g_{\mathrm{mlp}}(c)\odot
+\mathrm{MLP}\!\left(
+(1+\gamma_{\mathrm{mlp}}(c))\odot\mathrm{LN}(h')
++\beta_{\mathrm{mlp}}(c)\right).
+\end{aligned}
+$$
+
+**每个 block 共预测六组 $d$ 维参数：两个 shift、两个 scale、两个 gate。** gate 对应论文中的残差缩放系数 $\alpha$；这里改用 $g$，避免与扩散信号系数混淆。
+
+官方实现将条件调制网络最后一个线性层的权重和偏置初始化为零，使六组输出初始都为零。于是两个残差分支的 gate 为零，整个 block 初始为恒等映射：
+
+$$
+h''=h.
+$$
+
+这是 block 级别的性质；完整 DiT 还包含输入投影、最终调制与输出投影。adaLN-Zero 在论文的条件注入消融中表现最好，并被用作主要配置。
+
+## 4. 输出层与训练目标
+
+最后一个 block 之后，先做条件调制的 LayerNorm，再将每个 token 线性映射为 $p^2\times2C$ 个数，重新排列为 $H_z\times W_z\times2C$ 的输出。
+
+前 $C$ 个通道预测噪声，后 $C$ 个通道参数化对角反向方差。例如 $C=4$ 时，输出共 8 个通道。
+
+**这两个分支的学习目标不同：**噪声预测使用 DDPM 的简化 MSE；学习方差还需要变分下界相关的训练项。因此，理解原始 DiT 时，不能只用噪声 MSE 概括完整训练目标。
+
+## 5. 阅读时需要记住的结论
+
+- DiT 改变的是去噪网络 Backbone，仍在 VAE latent 空间执行扩散。
+- adaLN-Zero 通过条件调制与零初始化残差 gate 注入时间和类别信息。
+- 增加 token 数也会显著增加计算量；模型缩放需要同时考察参数量、GFLOPs 和训练预算。
+- SiT 沿用这一 Backbone，进一步研究概率路径、预测目标和采样方式。
 
 ## Reference
-* [Scalable Diffusion Models with Transformers](https://arxiv.org/abs/2212.09748)
 
-* [扩散模型解读 (一)：DiT 详细解读](https://zhuanlan.zhihu.com/p/685867473)
+- [Scalable Diffusion Models with Transformers](https://arxiv.org/abs/2212.09748)：架构、条件注入消融与 scaling 实验。
+- [DiT 官方实现：models.py](https://github.com/facebookresearch/DiT/blob/main/models.py)：`DiTBlock`、`FinalLayer` 与零初始化细节。
+- [DiT 官方训练实现](https://github.com/facebookresearch/DiT/blob/main/diffusion/gaussian_diffusion.py)：噪声和方差分支的训练目标。
+- [扩散模型解读（一）：DiT 详细解读](https://zhuanlan.zhihu.com/p/685867473)：辅助阅读。
