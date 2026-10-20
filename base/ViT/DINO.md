@@ -34,7 +34,7 @@ DINOv2、CAPI、DINOv3
 ```
 
 这些方法虽然具体 loss 和训练策略不同，但逐渐形成了一套比较统一的现代视觉自监督框架：
-\[
+$$
 \boxed{
 \text{Multi-view Augmentation}
 +
@@ -48,7 +48,7 @@ DINOv2、CAPI、DINOv3
 +
 \text{Global + Patch-level Representation}
 }
-\]
+$$
 
 ### 2. 核心思想
 1. Multi-view Augmentation：对同一张图像进行多种，改变图像外观和局部观察范围（不改变图像的主要语义），让模型学习对数据增强不敏感的语义表征。
